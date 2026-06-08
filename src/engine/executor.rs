@@ -438,4 +438,113 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_stats_recording_is_thread_safe() -> Result<()> {
+        let stats = Arc::new(Mutex::new(StatsCollector::new()));
+        let mut handles = Vec::new();
+
+        for _ in 0..100 {
+            let stats = Arc::clone(&stats);
+
+            let handle = tokio::spawn(async move {
+                for _ in 0..100 {
+                    let mut stats = lock_stats(stats.as_ref());
+                    stats.record(Duration::from_millis(10), 200);
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await.context("stats recording task panicked")?;
+        }
+
+        let snapshot = lock_stats(stats.as_ref()).snapshot();
+
+        assert_eq!(snapshot.total_requests, 10_000);
+        assert_eq!(snapshot.successful_requests, 10_000);
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(snapshot.histogram.len(), 10_000);
+        assert_eq!(snapshot.error_counts.total(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn lock_stats_recovers_from_poisoned_mutex() {
+        let stats = Arc::new(Mutex::new(StatsCollector::new()));
+        let poisoned_stats = Arc::clone(&stats);
+
+        let result = std::thread::spawn(move || {
+            let mut stats = poisoned_stats.lock().unwrap();
+
+            stats.record(Duration::from_millis(10), 200);
+
+            panic!("intentional panic while holding stats lock");
+        })
+        .join();
+
+        assert!(result.is_err());
+
+        {
+            let mut stats = lock_stats(stats.as_ref());
+            stats.record(Duration::from_millis(20), 200);
+        }
+
+        let snapshot = lock_stats(stats.as_ref()).snapshot();
+
+        assert_eq!(snapshot.total_requests, 2);
+        assert_eq!(snapshot.successful_requests, 2);
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(snapshot.histogram.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_mixed_stats_recording_is_thread_safe() -> Result<()> {
+        let stats = Arc::new(Mutex::new(StatsCollector::new()));
+        let mut handles = Vec::new();
+
+        for _ in 0..100 {
+            let stats = Arc::clone(&stats);
+
+            let handle = tokio::spawn(async move {
+                for index in 0..100 {
+                    let mut stats = lock_stats(stats.as_ref());
+
+                    match index % 5 {
+                        0 => stats.record(Duration::from_millis(10), 200),
+                        1 => stats.record(Duration::from_millis(20), 404),
+                        2 => stats.record(Duration::from_millis(30), 503),
+                        3 => stats.record_error(ErrorCategory::Timeout, "request timed out"),
+                        _ => stats.record_error(ErrorCategory::Connection, "connection refused"),
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle
+                .await
+                .context("mixed stats recording task panicked")?;
+        }
+
+        let snapshot = lock_stats(stats.as_ref()).snapshot();
+
+        assert_eq!(snapshot.total_requests, 10_000);
+        assert_eq!(snapshot.successful_requests, 2_000);
+        assert_eq!(snapshot.total_errors, 8_000);
+        assert_eq!(snapshot.error_counts.http_4xx, 2_000);
+        assert_eq!(snapshot.error_counts.http_5xx, 2_000);
+        assert_eq!(snapshot.error_counts.timeout, 2_000);
+        assert_eq!(snapshot.error_counts.connection, 2_000);
+        assert_eq!(snapshot.error_counts.other, 0);
+        assert_eq!(snapshot.error_counts.total(), 8_000);
+        assert_eq!(snapshot.histogram.len(), 6_000);
+
+        Ok(())
+    }
 }
