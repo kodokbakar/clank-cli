@@ -267,6 +267,10 @@ mod tests {
         assert_eq!(snapshot.successful_requests, 0);
         assert_eq!(snapshot.total_errors, 10);
         assert_eq!(snapshot.error_counts.connection, 10);
+        assert_eq!(snapshot.error_counts.timeout, 0);
+        assert_eq!(snapshot.error_counts.http_4xx, 0);
+        assert_eq!(snapshot.error_counts.http_5xx, 0);
+        assert_eq!(snapshot.error_counts.other, 0);
 
         Ok(())
     }
@@ -339,6 +343,98 @@ mod tests {
         assert_eq!(snapshot.total_errors, 0);
         assert!(snapshot.total_requests > 0);
         assert_eq!(mock.calls_async().await as u64, snapshot.total_requests);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_records_4xx_as_http_client_error() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/not-found");
+                then.status(404).body("not found");
+            })
+            .await;
+
+        let config = EngineConfig::new(server.url("/not-found"), 10);
+        let engine = Engine::new(config)?;
+
+        let snapshot = engine.run_for_requests(10).await?;
+
+        assert_eq!(snapshot.total_requests, 10);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 10);
+        assert_eq!(snapshot.error_counts.http_4xx, 10);
+        assert_eq!(snapshot.error_counts.http_5xx, 0);
+        assert_eq!(snapshot.error_counts.connection, 0);
+        assert_eq!(snapshot.error_counts.timeout, 0);
+        assert_eq!(mock.calls_async().await, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_records_5xx_as_http_server_error() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/server-error");
+                then.status(503).body("service unavailable");
+            })
+            .await;
+
+        let config = EngineConfig::new(server.url("/server-error"), 10);
+        let engine = Engine::new(config)?;
+
+        let snapshot = engine.run_for_requests(10).await?;
+
+        assert_eq!(snapshot.total_requests, 10);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 10);
+        assert_eq!(snapshot.error_counts.http_4xx, 0);
+        assert_eq!(snapshot.error_counts.http_5xx, 10);
+        assert_eq!(snapshot.error_counts.connection, 0);
+        assert_eq!(snapshot.error_counts.timeout, 0);
+        assert_eq!(mock.calls_async().await, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_records_timeout_errors() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/slow");
+                then.status(200)
+                    .delay(Duration::from_millis(100))
+                    .body("slow response");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/slow"),
+            method: "GET".to_string(),
+            body: None,
+            concurrency: 5,
+            timeout: Duration::from_millis(10),
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_requests(5).await?;
+
+        assert_eq!(snapshot.total_requests, 5);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 5);
+        assert_eq!(snapshot.error_counts.timeout, 5);
+        assert_eq!(snapshot.error_counts.connection, 0);
+        assert_eq!(snapshot.error_counts.http_4xx, 0);
+        assert_eq!(snapshot.error_counts.http_5xx, 0);
+        assert_eq!(mock.calls_async().await, 5);
 
         Ok(())
     }

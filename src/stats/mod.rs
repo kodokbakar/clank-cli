@@ -19,7 +19,9 @@ pub enum ErrorCategory {
 pub struct ErrorCounts {
     pub timeout: u64,
     pub connection: u64,
-    pub http: u64,
+    pub http_4xx: u64,
+    pub http_5xx: u64,
+    pub http_other: u64,
     pub other: u64,
 }
 
@@ -83,7 +85,16 @@ impl Default for Throughput {
 
 impl ErrorCounts {
     pub fn total(&self) -> u64 {
-        self.timeout + self.connection + self.http + self.other
+        self.timeout
+            + self.connection
+            + self.http_4xx
+            + self.http_5xx
+            + self.http_other
+            + self.other
+    }
+
+    pub fn http_total(&self) -> u64 {
+        self.http_4xx + self.http_5xx + self.http_other
     }
 }
 
@@ -147,7 +158,12 @@ impl StatsCollector {
 
         if status_code >= 400 {
             self.total_errors += 1;
-            self.error_counts.http += 1;
+
+            match status_code {
+                400..=499 => self.error_counts.http_4xx += 1,
+                500..=599 => self.error_counts.http_5xx += 1,
+                _ => self.error_counts.http_other += 1,
+            }
         } else {
             self.successful_requests += 1;
         }
@@ -160,7 +176,7 @@ impl StatsCollector {
         match category {
             ErrorCategory::Timeout => self.error_counts.timeout += 1,
             ErrorCategory::Connection => self.error_counts.connection += 1,
-            ErrorCategory::Http => self.error_counts.http += 1,
+            ErrorCategory::Http => self.error_counts.http_other += 1,
             ErrorCategory::Other => self.error_counts.other += 1,
         }
 
@@ -227,7 +243,9 @@ Successful:        {} ({:.1}%)
 Errors:            {} ({:.1}%)
   Timeout:         {}
   Connection:      {}
-  HTTP Error:      {}
+  HTTP 4xx:        {}
+  HTTP 5xx:        {}
+  HTTP Other:      {}
   Other:           {}
 ────────────────────────────────
 Latency (avg):     {:.1}ms
@@ -245,7 +263,9 @@ Duration:          {:.2}s
         error_percentage,
         format_number(snapshot.error_counts.timeout),
         format_number(snapshot.error_counts.connection),
-        format_number(snapshot.error_counts.http),
+        format_number(snapshot.error_counts.http_4xx),
+        format_number(snapshot.error_counts.http_5xx),
+        format_number(snapshot.error_counts.http_other),
         format_number(snapshot.error_counts.other),
         avg_latency_ms,
         p50_ms,
@@ -373,7 +393,9 @@ mod tests {
             error_counts: ErrorCounts {
                 timeout: 0,
                 connection: 0,
-                http: 20,
+                http_4xx: 0,
+                http_5xx: 20,
+                http_other: 0,
                 other: 0,
             },
             status_codes: BTreeMap::new(),
@@ -409,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn record_counts_http_status_error() {
+    fn record_counts_http_5xx_status_error() {
         let mut stats = StatsCollector::new();
 
         stats.record(Duration::from_millis(25), 503);
@@ -419,9 +441,37 @@ mod tests {
         assert_eq!(snapshot.total_requests, 1);
         assert_eq!(snapshot.successful_requests, 0);
         assert_eq!(snapshot.total_errors, 1);
-        assert_eq!(snapshot.error_counts.http, 1);
+        assert_eq!(snapshot.error_counts.http_4xx, 0);
+        assert_eq!(snapshot.error_counts.http_5xx, 1);
+        assert_eq!(snapshot.error_counts.http_other, 0);
         assert_eq!(snapshot.status_codes.get(&503), Some(&1));
         assert_eq!(snapshot.histogram.len(), 1);
+    }
+
+    #[test]
+    fn record_counts_mixed_error_categories() {
+        let mut stats = StatsCollector::new();
+
+        stats.record(Duration::from_millis(10), 200);
+        stats.record(Duration::from_millis(20), 404);
+        stats.record(Duration::from_millis(30), 503);
+        stats.record_error(ErrorCategory::Timeout, "request timed out");
+        stats.record_error(ErrorCategory::Connection, "connection refused");
+        stats.record_error(ErrorCategory::Other, "unsupported method");
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 6);
+        assert_eq!(snapshot.successful_requests, 1);
+        assert_eq!(snapshot.total_errors, 5);
+        assert_eq!(snapshot.error_counts.timeout, 1);
+        assert_eq!(snapshot.error_counts.connection, 1);
+        assert_eq!(snapshot.error_counts.http_4xx, 1);
+        assert_eq!(snapshot.error_counts.http_5xx, 1);
+        assert_eq!(snapshot.error_counts.http_other, 0);
+        assert_eq!(snapshot.error_counts.other, 1);
+        assert_eq!(snapshot.error_counts.total(), 5);
+        assert_eq!(snapshot.error_counts.http_total(), 2);
     }
 
     #[test]
@@ -490,7 +540,9 @@ mod tests {
         assert!(output.contains("Total Requests:    1,234"));
         assert!(output.contains("Successful:        1,200 (97.2%)"));
         assert!(output.contains("Errors:            34 (2.8%)"));
-        assert!(output.contains("HTTP Error:      34"));
+        assert!(output.contains("HTTP 4xx:        0"));
+        assert!(output.contains("HTTP 5xx:        34"));
+        assert!(output.contains("HTTP Other:      0"));
         assert!(output.contains("Latency (avg):"));
         assert!(output.contains("Latency (p50):"));
         assert!(output.contains("Latency (p95):"));
@@ -539,5 +591,39 @@ mod tests {
 
         assert!(snapshot.percentiles.p999 >= Duration::from_millis(99));
         assert!(snapshot.percentiles.p999 <= Duration::from_millis(101));
+    }
+
+    #[test]
+    fn record_counts_http_4xx_status_error() {
+        let mut stats = StatsCollector::new();
+
+        stats.record(Duration::from_millis(25), 404);
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.error_counts.http_4xx, 1);
+        assert_eq!(snapshot.error_counts.http_5xx, 0);
+        assert_eq!(snapshot.error_counts.http_other, 0);
+        assert_eq!(snapshot.status_codes.get(&404), Some(&1));
+    }
+
+    #[test]
+    fn record_error_http_category_counts_as_http_other() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_error(ErrorCategory::Http, "HTTP error without status code");
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.error_counts.http_4xx, 0);
+        assert_eq!(snapshot.error_counts.http_5xx, 0);
+        assert_eq!(snapshot.error_counts.http_other, 1);
+        assert_eq!(snapshot.error_counts.other, 0);
     }
 }
