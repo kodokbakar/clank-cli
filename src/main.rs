@@ -3,7 +3,7 @@ use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "crank-cli",
+    name = "clank-cli",
     version,
     about = "HTTP load testing CLI tool built with Rust"
 )]
@@ -25,7 +25,7 @@ struct Cli {
 async fn main() -> Result<()> {
     let _cli = Cli::parse();
 
-    println!("crank-cli scaffold is ready");
+    println!("clank-cli scaffold is ready");
 
     Ok(())
 }
