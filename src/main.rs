@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clank_cli::config::parse_duration;
 use clank_cli::engine::{Engine, EngineConfig};
+use clank_cli::stats::format_summary;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -66,9 +67,7 @@ async fn main() -> Result<()> {
         engine.run().await?
     };
 
-    println!("Total requests: {}", snapshot.total_requests);
-    println!("Total errors: {}", snapshot.total_errors);
-    println!("Status codes: {:?}", snapshot.status_codes);
+    println!("{}", format_summary(&snapshot));
 
     Ok(())
 }

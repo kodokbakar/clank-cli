@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::engine::http_client::HttpClient;
-use crate::stats::{StatsCollector, StatsSnapshot};
+use crate::engine::http_client::{HttpClient, HttpErrorKind};
+use crate::stats::{ErrorCategory, StatsCollector, StatsSnapshot};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -67,7 +67,14 @@ impl Engine {
         lock_stats(self.stats.as_ref()).snapshot()
     }
 
+    fn reset_timer(&self) {
+        let mut stats = lock_stats(self.stats.as_ref());
+        stats.reset_timer();
+    }
+
     pub async fn run(&self) -> Result<StatsSnapshot> {
+        self.reset_timer();
+
         self.run_until_shutdown(async {
             tokio::signal::ctrl_c()
                 .await
@@ -80,6 +87,8 @@ impl Engine {
         if duration.is_zero() {
             bail!("duration must be greater than 0");
         }
+
+        self.reset_timer();
 
         self.run_until_shutdown(async move {
             tokio::select! {
@@ -95,6 +104,8 @@ impl Engine {
     }
 
     pub async fn run_for_requests(&self, total_requests: usize) -> Result<StatsSnapshot> {
+        self.reset_timer();
+
         if total_requests == 0 {
             return Ok(self.snapshot());
         }
@@ -175,8 +186,10 @@ impl Engine {
                             stats.record(response.latency, response.status.as_u16());
                         }
                         Err(error) => {
+                            let category = error_category(error.kind());
                             let mut stats = lock_stats(stats.as_ref());
-                            stats.record_error(error);
+
+                            stats.record_error(category, error);
                         }
                     }
                 }
@@ -193,6 +206,16 @@ fn lock_stats(stats: &Mutex<StatsCollector>) -> MutexGuard<'_, StatsCollector> {
     match stats.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn error_category(kind: HttpErrorKind) -> ErrorCategory {
+    match kind {
+        HttpErrorKind::Timeout => ErrorCategory::Timeout,
+        HttpErrorKind::Connection => ErrorCategory::Connection,
+        HttpErrorKind::Request | HttpErrorKind::UnsupportedMethod | HttpErrorKind::Other => {
+            ErrorCategory::Other
+        }
     }
 }
 
@@ -240,8 +263,10 @@ mod tests {
         let engine = Engine::new(config)?;
         let snapshot = engine.run_for_requests(10).await?;
 
-        assert_eq!(snapshot.total_requests, 0);
+        assert_eq!(snapshot.total_requests, 10);
+        assert_eq!(snapshot.successful_requests, 0);
         assert_eq!(snapshot.total_errors, 10);
+        assert_eq!(snapshot.error_counts.connection, 10);
 
         Ok(())
     }

@@ -1,6 +1,8 @@
+use std::error::Error;
+use std::fmt;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode, header::HeaderMap};
 
 #[derive(Debug, Clone)]
@@ -15,6 +17,42 @@ pub struct HttpResponse {
     pub body: String,
     pub latency: Duration,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpErrorKind {
+    Timeout,
+    Connection,
+    Request,
+    UnsupportedMethod,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpClientError {
+    kind: HttpErrorKind,
+    message: String,
+}
+
+impl HttpClientError {
+    pub fn new(kind: HttpErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> HttpErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for HttpClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.message)
+    }
+}
+
+impl Error for HttpClientError {}
 
 impl HttpClient {
     pub fn new(timeout: Duration) -> Result<Self> {
@@ -31,7 +69,7 @@ impl HttpClient {
         method: &str,
         url: &str,
         body: Option<String>,
-    ) -> Result<HttpResponse> {
+    ) -> std::result::Result<HttpResponse, HttpClientError> {
         let normalized_method = method.to_ascii_uppercase();
 
         let request = match normalized_method.as_str() {
@@ -44,10 +82,12 @@ impl HttpClient {
                     None => request,
                 }
             }
-            _ => bail!(
-                "unsupported HTTP method: {}. Supported methods: GET, POST",
-                method
-            ),
+            _ => {
+                return Err(HttpClientError::new(
+                    HttpErrorKind::UnsupportedMethod,
+                    format!("unsupported HTTP method: {method}. Supported methods: GET, POST"),
+                ));
+            }
         };
 
         let started_at = Instant::now();
@@ -70,18 +110,21 @@ impl HttpClient {
     }
 }
 
-fn classify_reqwest_error(error: reqwest::Error) -> anyhow::Error {
+fn classify_reqwest_error(error: reqwest::Error) -> HttpClientError {
     if error.is_timeout() {
-        anyhow!("request timed out: {}", error)
+        HttpClientError::new(
+            HttpErrorKind::Timeout,
+            format!("request timed out: {error}"),
+        )
     } else if error.is_connect() {
-        anyhow!(
-            "connection failed, DNS failed, or target refused connection: {}",
-            error
+        HttpClientError::new(
+            HttpErrorKind::Connection,
+            format!("connection failed, DNS failed, or target refused connection: {error}"),
         )
     } else if error.is_request() {
-        anyhow!("invalid request: {}", error)
+        HttpClientError::new(HttpErrorKind::Request, format!("invalid request: {error}"))
     } else {
-        anyhow!("HTTP client error: {}", error)
+        HttpClientError::new(HttpErrorKind::Other, format!("HTTP client error: {error}"))
     }
 }
 
@@ -89,6 +132,7 @@ fn classify_reqwest_error(error: reqwest::Error) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    use anyhow::Result;
     use httpmock::prelude::*;
 
     #[tokio::test]
@@ -111,8 +155,7 @@ mod tests {
         assert!(result.headers.contains_key("content-type"));
         assert_eq!(result.body, r#"{"ok":true}"#);
         assert!(result.latency > Duration::ZERO);
-
-        mock.assert_async().await;
+        assert_eq!(mock.calls_async().await, 1);
 
         Ok(())
     }
@@ -136,8 +179,7 @@ mod tests {
         assert_eq!(result.status, StatusCode::CREATED);
         assert_eq!(result.body, "created");
         assert!(result.latency > Duration::ZERO);
-
-        mock.assert_async().await;
+        assert_eq!(mock.calls_async().await, 1);
 
         Ok(())
     }
@@ -151,6 +193,10 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+
+        let error = result.unwrap_err();
+
+        assert_eq!(error.kind(), HttpErrorKind::UnsupportedMethod);
 
         Ok(())
     }
