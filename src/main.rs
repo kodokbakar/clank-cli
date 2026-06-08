@@ -36,6 +36,9 @@ struct Cli {
 
     #[arg(long, default_value_t = 10)]
     timeout_secs: u64,
+
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 #[tokio::main]
@@ -56,7 +59,7 @@ async fn main() -> Result<()> {
         timeout: Duration::from_secs(cli.timeout_secs),
     };
 
-    let engine = Engine::new(config)?;
+    let engine = Engine::new_with_progress(config, !cli.quiet)?;
 
     let snapshot = if let Some(total_requests) = cli.requests {
         engine.run_for_requests(total_requests).await?
