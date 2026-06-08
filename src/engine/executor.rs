@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::engine::http_client::HttpClient;
 use crate::stats::{StatsCollector, StatsSnapshot};
@@ -71,6 +72,24 @@ impl Engine {
             tokio::signal::ctrl_c()
                 .await
                 .context("failed to listen for Ctrl+C signal")
+        })
+        .await
+    }
+
+    pub async fn run_for_duration(&self, duration: Duration) -> Result<StatsSnapshot> {
+        if duration.is_zero() {
+            bail!("duration must be greater than 0");
+        }
+
+        self.run_until_shutdown(async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    result.context("failed to listen for Ctrl+C signal")
+                }
+                _ = timeout(duration, std::future::pending::<()>()) => {
+                    Ok(())
+                }
+            }
         })
         .await
     }
@@ -268,5 +287,34 @@ mod tests {
         let result = Engine::new(config);
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_for_duration_stops_workers_without_panic() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/duration");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/duration"),
+            method: "GET".to_string(),
+            body: None,
+            concurrency: 10,
+            timeout: Duration::from_secs(1),
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_duration(Duration::from_millis(50)).await?;
+
+        assert_eq!(snapshot.total_errors, 0);
+        assert!(snapshot.total_requests > 0);
+        assert_eq!(mock.calls_async().await as u64, snapshot.total_requests);
+
+        Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+use clank_cli::config::parse_duration;
 use clank_cli::engine::{Engine, EngineConfig};
 use clap::Parser;
 
@@ -11,27 +12,27 @@ use clap::Parser;
     about = "HTTP load testing CLI tool built with Rust"
 )]
 struct Cli {
-    /// Target URL for the load test
-    #[arg(short, long)]
+    #[arg(value_name = "URL")]
+    target_url: Option<String>,
+
+    #[arg(long, value_name = "URL")]
     url: Option<String>,
 
-    /// HTTP method to use
     #[arg(short = 'X', long, default_value = "GET")]
     method: String,
 
-    /// Optional request body for POST requests
     #[arg(long)]
     body: Option<String>,
 
-    /// Number of concurrent workers
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 10)]
     concurrency: usize,
 
-    /// Total requests to send. If omitted, runs until Ctrl+C.
     #[arg(short = 'n', long)]
     requests: Option<usize>,
 
-    /// Request timeout in seconds
+    #[arg(short, long, value_parser = parse_duration_arg)]
+    duration: Option<Duration>,
+
     #[arg(long, default_value_t = 10)]
     timeout_secs: u64,
 }
@@ -40,11 +41,11 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let Some(url) = cli.url else {
-        println!("clank-cli scaffold is ready");
-        println!("Run with: clank-cli --url <URL> --concurrency 10");
-        return Ok(());
-    };
+    if cli.requests.is_some() && cli.duration.is_some() {
+        bail!("use either --requests or --duration, not both");
+    }
+
+    let url = resolve_url(&cli)?;
 
     let config = EngineConfig {
         url,
@@ -56,12 +57,13 @@ async fn main() -> Result<()> {
 
     let engine = Engine::new(config)?;
 
-    let snapshot = match cli.requests {
-        Some(total_requests) => engine.run_for_requests(total_requests).await?,
-        None => {
-            println!("Running load test. Press Ctrl+C to stop.");
-            engine.run().await?
-        }
+    let snapshot = if let Some(total_requests) = cli.requests {
+        engine.run_for_requests(total_requests).await?
+    } else if let Some(duration) = cli.duration {
+        engine.run_for_duration(duration).await?
+    } else {
+        println!("Running load test. Press Ctrl+C to stop.");
+        engine.run().await?
     };
 
     println!("Total requests: {}", snapshot.total_requests);
@@ -69,4 +71,18 @@ async fn main() -> Result<()> {
     println!("Status codes: {:?}", snapshot.status_codes);
 
     Ok(())
+}
+
+fn resolve_url(cli: &Cli) -> Result<String> {
+    match (&cli.target_url, &cli.url) {
+        (Some(_), Some(_)) => {
+            bail!("provide target URL either as positional argument or --url, not both")
+        }
+        (Some(url), None) | (None, Some(url)) => Ok(url.clone()),
+        (None, None) => bail!("target URL is required. Usage: clank-cli <URL> -c 10 -d 5s"),
+    }
+}
+
+fn parse_duration_arg(value: &str) -> Result<Duration, String> {
+    parse_duration(value).map_err(|error| error.to_string())
 }
