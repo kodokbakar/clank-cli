@@ -73,6 +73,32 @@ impl HdrHistogram {
 
         latencies
     }
+
+    pub fn percentile(&self, p: f64) -> Duration {
+        if self.is_empty() {
+            return Duration::ZERO;
+        }
+
+        let quantile = if p.is_nan() { 0.0 } else { p.clamp(0.0, 1.0) };
+
+        Duration::from_micros(self.inner.value_at_quantile(quantile))
+    }
+
+    pub fn p50(&self) -> Duration {
+        self.percentile(0.50)
+    }
+
+    pub fn p95(&self) -> Duration {
+        self.percentile(0.95)
+    }
+
+    pub fn p99(&self) -> Duration {
+        self.percentile(0.99)
+    }
+
+    pub fn p999(&self) -> Duration {
+        self.percentile(0.999)
+    }
 }
 
 impl Default for HdrHistogram {
@@ -190,5 +216,60 @@ mod tests {
         let latencies = histogram.to_durations();
 
         assert_eq!(latencies.len(), 3);
+    }
+
+    #[test]
+    fn percentile_returns_zero_for_empty_histogram() {
+        let histogram = HdrHistogram::new();
+
+        assert_eq!(histogram.percentile(0.50), Duration::ZERO);
+        assert_eq!(histogram.p50(), Duration::ZERO);
+        assert_eq!(histogram.p95(), Duration::ZERO);
+        assert_eq!(histogram.p99(), Duration::ZERO);
+        assert_eq!(histogram.p999(), Duration::ZERO);
+    }
+
+    #[test]
+    fn percentile_calculates_common_latency_percentiles() {
+        let mut histogram = HdrHistogram::new();
+
+        for value in 1..=100 {
+            histogram.record(Duration::from_millis(value));
+        }
+
+        assert_duration_close(Some(histogram.p50()), Duration::from_millis(50));
+        assert_duration_close(Some(histogram.p95()), Duration::from_millis(95));
+        assert_duration_close(Some(histogram.p99()), Duration::from_millis(99));
+        assert_duration_close(Some(histogram.p999()), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn percentile_is_accurate_for_large_dataset() {
+        let mut histogram = HdrHistogram::new();
+
+        for value in 1..=10_000 {
+            histogram.record(Duration::from_micros(value));
+        }
+
+        let p50_us = histogram.p50().as_secs_f64() * 1_000_000.0;
+        let p95_us = histogram.p95().as_secs_f64() * 1_000_000.0;
+        let p99_us = histogram.p99().as_secs_f64() * 1_000_000.0;
+        let p999_us = histogram.p999().as_secs_f64() * 1_000_000.0;
+
+        assert!((p50_us - 5_000.0).abs() < 50.0);
+        assert!((p95_us - 9_500.0).abs() < 100.0);
+        assert!((p99_us - 9_900.0).abs() < 100.0);
+        assert!((p999_us - 9_990.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn percentile_clamps_invalid_quantile_range() {
+        let mut histogram = HdrHistogram::new();
+
+        histogram.record(Duration::from_millis(10));
+        histogram.record(Duration::from_millis(20));
+
+        assert_duration_close(Some(histogram.percentile(-1.0)), Duration::from_millis(10));
+        assert_duration_close(Some(histogram.percentile(2.0)), Duration::from_millis(20));
     }
 }

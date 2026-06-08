@@ -23,6 +23,14 @@ pub struct ErrorCounts {
     pub other: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Percentiles {
+    pub p50: Duration,
+    pub p95: Duration,
+    pub p99: Duration,
+    pub p999: Duration,
+}
+
 impl ErrorCounts {
     pub fn total(&self) -> u64 {
         self.timeout + self.connection + self.http + self.other
@@ -50,6 +58,7 @@ pub struct StatsSnapshot {
     pub error_counts: ErrorCounts,
     pub status_codes: BTreeMap<u16, u64>,
     pub histogram: HdrHistogram,
+    pub percentiles: Percentiles,
     pub latencies: Vec<Duration>,
     pub errors: Vec<String>,
 }
@@ -112,6 +121,13 @@ impl StatsCollector {
     pub fn snapshot(&self) -> StatsSnapshot {
         let histogram = self.histogram.clone();
 
+        let percentiles = Percentiles {
+            p50: histogram.p50(),
+            p95: histogram.p95(),
+            p99: histogram.p99(),
+            p999: histogram.p999(),
+        };
+
         StatsSnapshot {
             duration: self.started_at.elapsed(),
             total_requests: self.total_requests,
@@ -121,6 +137,7 @@ impl StatsCollector {
             status_codes: self.status_codes.clone(),
             latencies: histogram.to_durations(),
             histogram,
+            percentiles,
             errors: self.errors.clone(),
         }
     }
@@ -134,6 +151,10 @@ pub fn format_summary(snapshot: &StatsSnapshot) -> String {
     let successful_percentage = percentage(successful, total_requests);
     let error_percentage = percentage(errors, total_requests);
     let avg_latency_ms = average_latency_ms(snapshot);
+    let p50_ms = duration_to_ms(snapshot.percentiles.p50);
+    let p95_ms = duration_to_ms(snapshot.percentiles.p95);
+    let p99_ms = duration_to_ms(snapshot.percentiles.p99);
+    let p999_ms = duration_to_ms(snapshot.percentiles.p999);
     let duration_secs = snapshot.duration.as_secs_f64();
     let throughput = if duration_secs > 0.0 {
         total_requests as f64 / duration_secs
@@ -154,6 +175,10 @@ Errors:            {} ({:.1}%)
   Other:           {}
 ────────────────────────────────
 Latency (avg):     {:.1}ms
+Latency (p50):     {:.1}ms
+Latency (p95):     {:.1}ms
+Latency (p99):     {:.1}ms
+Latency (p999):    {:.1}ms
 Throughput:        {:.1} req/s
 Duration:          {:.2}s
 ────────────────────────────────",
@@ -167,6 +192,10 @@ Duration:          {:.2}s
         format_number(snapshot.error_counts.http),
         format_number(snapshot.error_counts.other),
         avg_latency_ms,
+        p50_ms,
+        p95_ms,
+        p99_ms,
+        p999_ms,
         throughput,
         duration_secs
     )
@@ -186,6 +215,10 @@ fn average_latency_ms(snapshot: &StatsSnapshot) -> f64 {
         .mean()
         .map(|duration| duration.as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
+}
+
+fn duration_to_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn format_number(value: u64) -> String {
@@ -285,6 +318,10 @@ mod tests {
         assert!(output.contains("Successful:        0 (0.0%)"));
         assert!(output.contains("Errors:            0 (0.0%)"));
         assert!(output.contains("Latency (avg):     0.0ms"));
+        assert!(output.contains("Latency (p50):     0.0ms"));
+        assert!(output.contains("Latency (p95):     0.0ms"));
+        assert!(output.contains("Latency (p99):     0.0ms"));
+        assert!(output.contains("Latency (p999):    0.0ms"));
     }
 
     #[test]
@@ -306,6 +343,10 @@ mod tests {
         assert!(output.contains("Errors:            34 (2.8%)"));
         assert!(output.contains("HTTP Error:      34"));
         assert!(output.contains("Latency (avg):"));
+        assert!(output.contains("Latency (p50):"));
+        assert!(output.contains("Latency (p95):"));
+        assert!(output.contains("Latency (p99):"));
+        assert!(output.contains("Latency (p999):"));
     }
 
     #[test]
@@ -326,5 +367,28 @@ mod tests {
         let mean_us = snapshot.histogram.mean().unwrap().as_secs_f64() * 1_000_000.0;
 
         assert!((mean_us - 500.5).abs() < 2.0);
+    }
+
+    #[test]
+    fn snapshot_includes_latency_percentiles() {
+        let mut stats = StatsCollector::new();
+
+        for value in 1..=100 {
+            stats.record(Duration::from_millis(value), 200);
+        }
+
+        let snapshot = stats.snapshot();
+
+        assert!(snapshot.percentiles.p50 >= Duration::from_millis(49));
+        assert!(snapshot.percentiles.p50 <= Duration::from_millis(51));
+
+        assert!(snapshot.percentiles.p95 >= Duration::from_millis(94));
+        assert!(snapshot.percentiles.p95 <= Duration::from_millis(96));
+
+        assert!(snapshot.percentiles.p99 >= Duration::from_millis(98));
+        assert!(snapshot.percentiles.p99 <= Duration::from_millis(100));
+
+        assert!(snapshot.percentiles.p999 >= Duration::from_millis(99));
+        assert!(snapshot.percentiles.p999 <= Duration::from_millis(101));
     }
 }
