@@ -31,6 +31,56 @@ pub struct Percentiles {
     pub p999: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Throughput {
+    pub requests_per_second: f64,
+    pub successful_per_second: f64,
+    pub failed_per_second: f64,
+    pub total_requests: u64,
+    pub duration: Duration,
+}
+
+impl Throughput {
+    pub fn calculate(
+        total_requests: u64,
+        successful_requests: u64,
+        total_errors: u64,
+        duration: Duration,
+    ) -> Self {
+        let duration_secs = duration.as_secs_f64();
+
+        if duration_secs == 0.0 {
+            return Self {
+                requests_per_second: 0.0,
+                successful_per_second: 0.0,
+                failed_per_second: 0.0,
+                total_requests,
+                duration,
+            };
+        }
+
+        Self {
+            requests_per_second: total_requests as f64 / duration_secs,
+            successful_per_second: successful_requests as f64 / duration_secs,
+            failed_per_second: total_errors as f64 / duration_secs,
+            total_requests,
+            duration,
+        }
+    }
+}
+
+impl Default for Throughput {
+    fn default() -> Self {
+        Self {
+            requests_per_second: 0.0,
+            successful_per_second: 0.0,
+            failed_per_second: 0.0,
+            total_requests: 0,
+            duration: Duration::ZERO,
+        }
+    }
+}
+
 impl ErrorCounts {
     pub fn total(&self) -> u64 {
         self.timeout + self.connection + self.http + self.other
@@ -59,6 +109,7 @@ pub struct StatsSnapshot {
     pub status_codes: BTreeMap<u16, u64>,
     pub histogram: HdrHistogram,
     pub percentiles: Percentiles,
+    pub throughput: Throughput,
     pub latencies: Vec<Duration>,
     pub errors: Vec<String>,
 }
@@ -119,6 +170,7 @@ impl StatsCollector {
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
+        let duration = self.started_at.elapsed();
         let histogram = self.histogram.clone();
 
         let percentiles = Percentiles {
@@ -128,8 +180,15 @@ impl StatsCollector {
             p999: histogram.p999(),
         };
 
+        let throughput = Throughput::calculate(
+            self.total_requests,
+            self.successful_requests,
+            self.total_errors,
+            duration,
+        );
+
         StatsSnapshot {
-            duration: self.started_at.elapsed(),
+            duration,
             total_requests: self.total_requests,
             successful_requests: self.successful_requests,
             total_errors: self.total_errors,
@@ -138,6 +197,7 @@ impl StatsCollector {
             latencies: histogram.to_durations(),
             histogram,
             percentiles,
+            throughput,
             errors: self.errors.clone(),
         }
     }
@@ -156,11 +216,7 @@ pub fn format_summary(snapshot: &StatsSnapshot) -> String {
     let p99_ms = duration_to_ms(snapshot.percentiles.p99);
     let p999_ms = duration_to_ms(snapshot.percentiles.p999);
     let duration_secs = snapshot.duration.as_secs_f64();
-    let throughput = if duration_secs > 0.0 {
-        total_requests as f64 / duration_secs
-    } else {
-        0.0
-    };
+    let throughput = snapshot.throughput.requests_per_second;
 
     format!(
         "\
@@ -239,6 +295,99 @@ fn format_number(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_float_close(actual: f64, expected: f64) {
+        let diff = (actual - expected).abs();
+
+        assert!(
+            diff < 0.0001,
+            "actual: {actual}, expected: {expected}, diff: {diff}"
+        );
+    }
+
+    #[test]
+    fn throughput_calculates_normal_rates() {
+        let throughput = Throughput::calculate(100, 80, 20, Duration::from_secs(10));
+
+        assert_float_close(throughput.requests_per_second, 10.0);
+        assert_float_close(throughput.successful_per_second, 8.0);
+        assert_float_close(throughput.failed_per_second, 2.0);
+        assert_eq!(throughput.total_requests, 100);
+        assert_eq!(throughput.duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn throughput_returns_zero_for_zero_duration() {
+        let throughput = Throughput::calculate(100, 80, 20, Duration::ZERO);
+
+        assert_float_close(throughput.requests_per_second, 0.0);
+        assert_float_close(throughput.successful_per_second, 0.0);
+        assert_float_close(throughput.failed_per_second, 0.0);
+        assert_eq!(throughput.total_requests, 100);
+        assert_eq!(throughput.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn throughput_returns_zero_for_zero_requests() {
+        let throughput = Throughput::calculate(0, 0, 0, Duration::from_secs(10));
+
+        assert_float_close(throughput.requests_per_second, 0.0);
+        assert_float_close(throughput.successful_per_second, 0.0);
+        assert_float_close(throughput.failed_per_second, 0.0);
+        assert_eq!(throughput.total_requests, 0);
+        assert_eq!(throughput.duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn throughput_handles_one_request_in_short_duration() {
+        let throughput = Throughput::calculate(1, 1, 0, Duration::from_millis(1));
+
+        assert_float_close(throughput.requests_per_second, 1000.0);
+        assert_float_close(throughput.successful_per_second, 1000.0);
+        assert_float_close(throughput.failed_per_second, 0.0);
+        assert_eq!(throughput.total_requests, 1);
+    }
+
+    #[test]
+    fn snapshot_includes_throughput() {
+        let mut stats = StatsCollector::new();
+
+        stats.record(Duration::from_millis(10), 200);
+        stats.record(Duration::from_millis(20), 503);
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.throughput.total_requests, 2);
+        assert!(snapshot.throughput.requests_per_second > 0.0);
+        assert!(snapshot.throughput.successful_per_second > 0.0);
+        assert!(snapshot.throughput.failed_per_second > 0.0);
+    }
+
+    #[test]
+    fn format_summary_uses_throughput_struct() {
+        let snapshot = StatsSnapshot {
+            duration: Duration::from_secs(10),
+            total_requests: 100,
+            successful_requests: 80,
+            total_errors: 20,
+            error_counts: ErrorCounts {
+                timeout: 0,
+                connection: 0,
+                http: 20,
+                other: 0,
+            },
+            status_codes: BTreeMap::new(),
+            histogram: HdrHistogram::new(),
+            percentiles: Percentiles::default(),
+            throughput: Throughput::calculate(100, 80, 20, Duration::from_secs(10)),
+            latencies: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let output = format_summary(&snapshot);
+
+        assert!(output.contains("Throughput:        10.0 req/s"));
+    }
 
     #[test]
     fn record_increments_successful_requests_and_status_code_count() {
