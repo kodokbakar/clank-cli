@@ -1,5 +1,9 @@
+pub mod histogram;
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+pub use histogram::HdrHistogram;
 
 const MAX_STORED_ERRORS: usize = 100;
 
@@ -33,11 +37,11 @@ pub struct StatsCollector {
     total_errors: u64,
     error_counts: ErrorCounts,
     status_codes: BTreeMap<u16, u64>,
-    latencies: Vec<Duration>,
+    histogram: HdrHistogram,
     errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StatsSnapshot {
     pub duration: Duration,
     pub total_requests: u64,
@@ -45,6 +49,7 @@ pub struct StatsSnapshot {
     pub total_errors: u64,
     pub error_counts: ErrorCounts,
     pub status_codes: BTreeMap<u16, u64>,
+    pub histogram: HdrHistogram,
     pub latencies: Vec<Duration>,
     pub errors: Vec<String>,
 }
@@ -58,7 +63,7 @@ impl Default for StatsCollector {
             total_errors: 0,
             error_counts: ErrorCounts::default(),
             status_codes: BTreeMap::new(),
-            latencies: Vec::new(),
+            histogram: HdrHistogram::new(),
             errors: Vec::new(),
         }
     }
@@ -75,7 +80,7 @@ impl StatsCollector {
 
     pub fn record(&mut self, latency: Duration, status_code: u16) {
         self.total_requests += 1;
-        self.latencies.push(latency);
+        self.histogram.record(latency);
 
         let count = self.status_codes.entry(status_code).or_insert(0);
         *count += 1;
@@ -105,6 +110,8 @@ impl StatsCollector {
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
+        let histogram = self.histogram.clone();
+
         StatsSnapshot {
             duration: self.started_at.elapsed(),
             total_requests: self.total_requests,
@@ -112,7 +119,8 @@ impl StatsCollector {
             total_errors: self.total_errors,
             error_counts: self.error_counts.clone(),
             status_codes: self.status_codes.clone(),
-            latencies: self.latencies.clone(),
+            latencies: histogram.to_durations(),
+            histogram,
             errors: self.errors.clone(),
         }
     }
@@ -125,7 +133,7 @@ pub fn format_summary(snapshot: &StatsSnapshot) -> String {
 
     let successful_percentage = percentage(successful, total_requests);
     let error_percentage = percentage(errors, total_requests);
-    let avg_latency_ms = average_latency_ms(&snapshot.latencies);
+    let avg_latency_ms = average_latency_ms(snapshot);
     let duration_secs = snapshot.duration.as_secs_f64();
     let throughput = if duration_secs > 0.0 {
         total_requests as f64 / duration_secs
@@ -172,17 +180,12 @@ fn percentage(value: u64, total: u64) -> f64 {
     }
 }
 
-fn average_latency_ms(latencies: &[Duration]) -> f64 {
-    if latencies.is_empty() {
-        return 0.0;
-    }
-
-    let total_ms: f64 = latencies
-        .iter()
+fn average_latency_ms(snapshot: &StatsSnapshot) -> f64 {
+    snapshot
+        .histogram
+        .mean()
         .map(|duration| duration.as_secs_f64() * 1000.0)
-        .sum();
-
-    total_ms / latencies.len() as f64
+        .unwrap_or(0.0)
 }
 
 fn format_number(value: u64) -> String {
@@ -219,6 +222,7 @@ mod tests {
         assert_eq!(snapshot.total_errors, 0);
         assert_eq!(snapshot.status_codes.get(&200), Some(&2));
         assert_eq!(snapshot.status_codes.get(&302), Some(&1));
+        assert_eq!(snapshot.histogram.len(), 3);
         assert_eq!(snapshot.latencies.len(), 3);
     }
 
@@ -235,6 +239,7 @@ mod tests {
         assert_eq!(snapshot.total_errors, 1);
         assert_eq!(snapshot.error_counts.http, 1);
         assert_eq!(snapshot.status_codes.get(&503), Some(&1));
+        assert_eq!(snapshot.histogram.len(), 1);
     }
 
     #[test]
@@ -250,6 +255,8 @@ mod tests {
         assert_eq!(snapshot.total_errors, 1);
         assert_eq!(snapshot.error_counts.connection, 1);
         assert_eq!(snapshot.errors.len(), 1);
+        assert_eq!(snapshot.histogram.len(), 0);
+        assert_eq!(snapshot.latencies.len(), 0);
     }
 
     #[test]
@@ -265,6 +272,7 @@ mod tests {
         assert_eq!(snapshot.total_requests, 150);
         assert_eq!(snapshot.total_errors, 150);
         assert_eq!(snapshot.errors.len(), MAX_STORED_ERRORS);
+        assert_eq!(snapshot.histogram.len(), 0);
     }
 
     #[test]
@@ -297,5 +305,26 @@ mod tests {
         assert!(output.contains("Successful:        1,200 (97.2%)"));
         assert!(output.contains("Errors:            34 (2.8%)"));
         assert!(output.contains("HTTP Error:      34"));
+        assert!(output.contains("Latency (avg):"));
+    }
+
+    #[test]
+    fn histogram_records_more_than_one_thousand_latency_samples() {
+        let mut stats = StatsCollector::new();
+
+        for micros in 1..=1000 {
+            stats.record(Duration::from_micros(micros), 200);
+        }
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 1000);
+        assert_eq!(snapshot.successful_requests, 1000);
+        assert_eq!(snapshot.histogram.len(), 1000);
+        assert_eq!(snapshot.latencies.len(), 1000);
+
+        let mean_us = snapshot.histogram.mean().unwrap().as_secs_f64() * 1_000_000.0;
+
+        assert!((mean_us - 500.5).abs() < 2.0);
     }
 }
