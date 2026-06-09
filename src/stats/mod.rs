@@ -3,7 +3,10 @@ pub mod histogram;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::ui::LiveStats;
+use crate::ui::{
+    LiveStats, count_error_color, count_warning_color, error_rate_color, latency_color,
+    maybe_color, success_rate_color, throughput_color,
+};
 
 pub use histogram::HdrHistogram;
 
@@ -266,6 +269,10 @@ impl StatsCollector {
 }
 
 pub fn format_summary(snapshot: &StatsSnapshot) -> String {
+    format_summary_with_color(snapshot, false)
+}
+
+pub fn format_summary_with_color(snapshot: &StatsSnapshot, color_enabled: bool) -> String {
     let total_requests = snapshot.total_requests;
     let successful = snapshot.successful_requests;
     let errors = snapshot.total_errors;
@@ -280,13 +287,77 @@ pub fn format_summary(snapshot: &StatsSnapshot) -> String {
     let duration_secs = snapshot.duration.as_secs_f64();
     let throughput = snapshot.throughput.requests_per_second;
 
+    let successful_line = maybe_color(
+        &format!(
+            "{} ({:.1}%)",
+            format_number(successful),
+            successful_percentage
+        ),
+        success_rate_color(successful_percentage),
+        color_enabled,
+    );
+
+    let errors_line = maybe_color(
+        &format!("{} ({:.1}%)", format_number(errors), error_percentage),
+        error_rate_color(error_percentage),
+        color_enabled,
+    );
+
+    let timeout_count = maybe_color(
+        &format_number(snapshot.error_counts.timeout),
+        count_error_color(snapshot.error_counts.timeout),
+        color_enabled,
+    );
+
+    let connection_count = maybe_color(
+        &format_number(snapshot.error_counts.connection),
+        count_error_color(snapshot.error_counts.connection),
+        color_enabled,
+    );
+
+    let http_4xx_count = maybe_color(
+        &format_number(snapshot.error_counts.http_4xx),
+        count_warning_color(snapshot.error_counts.http_4xx),
+        color_enabled,
+    );
+
+    let http_5xx_count = maybe_color(
+        &format_number(snapshot.error_counts.http_5xx),
+        count_error_color(snapshot.error_counts.http_5xx),
+        color_enabled,
+    );
+
+    let http_other_count = maybe_color(
+        &format_number(snapshot.error_counts.http_other),
+        count_warning_color(snapshot.error_counts.http_other),
+        color_enabled,
+    );
+
+    let other_count = maybe_color(
+        &format_number(snapshot.error_counts.other),
+        count_error_color(snapshot.error_counts.other),
+        color_enabled,
+    );
+
+    let p99_line = maybe_color(
+        &format!("{:.1}ms", p99_ms),
+        latency_color(p99_ms),
+        color_enabled,
+    );
+
+    let throughput_line = maybe_color(
+        &format!("{:.1} req/s", throughput),
+        throughput_color(throughput),
+        color_enabled,
+    );
+
     format!(
         "\
 Results:
 ────────────────────────────────
 Total Requests:    {}
-Successful:        {} ({:.1}%)
-Errors:            {} ({:.1}%)
+Successful:        {}
+Errors:            {}
   Timeout:         {}
   Connection:      {}
   HTTP 4xx:        {}
@@ -297,28 +368,26 @@ Errors:            {} ({:.1}%)
 Latency (avg):     {:.1}ms
 Latency (p50):     {:.1}ms
 Latency (p95):     {:.1}ms
-Latency (p99):     {:.1}ms
+Latency (p99):     {}
 Latency (p999):    {:.1}ms
-Throughput:        {:.1} req/s
+Throughput:        {}
 Duration:          {:.2}s
 ────────────────────────────────",
         format_number(total_requests),
-        format_number(successful),
-        successful_percentage,
-        format_number(errors),
-        error_percentage,
-        format_number(snapshot.error_counts.timeout),
-        format_number(snapshot.error_counts.connection),
-        format_number(snapshot.error_counts.http_4xx),
-        format_number(snapshot.error_counts.http_5xx),
-        format_number(snapshot.error_counts.http_other),
-        format_number(snapshot.error_counts.other),
+        successful_line,
+        errors_line,
+        timeout_count,
+        connection_count,
+        http_4xx_count,
+        http_5xx_count,
+        http_other_count,
+        other_count,
         avg_latency_ms,
         p50_ms,
         p95_ms,
-        p99_ms,
+        p99_line,
         p999_ms,
-        throughput,
+        throughput_line,
         duration_secs
     )
 }
@@ -714,5 +783,36 @@ mod tests {
         assert_eq!(live.avg_latency_ms, 0.0);
         assert_eq!(live.min_latency_ms, 0.0);
         assert_eq!(live.max_latency_ms, 0.0);
+    }
+
+    #[test]
+    fn format_summary_with_color_disabled_matches_plain_summary() {
+        let mut stats = StatsCollector::new();
+
+        stats.record(Duration::from_millis(45), 200);
+        stats.record(Duration::from_millis(50), 503);
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(
+            format_summary(&snapshot),
+            format_summary_with_color(&snapshot, false)
+        );
+    }
+
+    #[test]
+    fn format_summary_with_color_keeps_plain_content_visible() {
+        let mut stats = StatsCollector::new();
+
+        for _ in 0..100 {
+            stats.record(Duration::from_millis(45), 200);
+        }
+
+        let output = format_summary_with_color(&stats.snapshot(), true);
+
+        assert!(output.contains("Successful:"));
+        assert!(output.contains("Errors:"));
+        assert!(output.contains("Latency (p99):"));
+        assert!(output.contains("Throughput:"));
     }
 }

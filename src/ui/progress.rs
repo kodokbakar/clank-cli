@@ -8,7 +8,7 @@ use console::Term;
 use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
-use crate::ui::{LiveStats, format_live};
+use crate::ui::{LiveStats, format_live_with_color};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -24,11 +24,27 @@ pub struct ProgressTracker {
     mode: ProgressMode,
     started_at: Instant,
     duration: Option<Duration>,
+    color_enabled: bool,
 }
 
 impl ProgressTracker {
     pub fn new(total_requests: Option<u64>, duration: Option<Duration>, enabled: bool) -> Self {
-        Self::with_terminal(total_requests, duration, enabled, Term::stderr().is_term())
+        Self::new_with_color(total_requests, duration, enabled, true)
+    }
+
+    pub fn new_with_color(
+        total_requests: Option<u64>,
+        duration: Option<Duration>,
+        enabled: bool,
+        color_enabled: bool,
+    ) -> Self {
+        Self::with_terminal_and_color(
+            total_requests,
+            duration,
+            enabled,
+            Term::stderr().is_term(),
+            color_enabled,
+        )
     }
 
     pub fn tick(&self) {
@@ -45,7 +61,8 @@ impl ProgressTracker {
             return;
         }
 
-        self.bar.set_prefix(format_live(stats));
+        self.bar
+            .set_prefix(format_live_with_color(stats, self.color_enabled));
     }
 
     pub fn finish(&self) {
@@ -72,6 +89,10 @@ impl ProgressTracker {
         self.bar.length()
     }
 
+    pub fn color_enabled(&self) -> bool {
+        self.color_enabled
+    }
+
     pub fn spawn_duration_ticker(&self, shutdown: Arc<AtomicBool>) -> Option<JoinHandle<()>> {
         if self.mode != ProgressMode::Duration {
             return None;
@@ -94,11 +115,12 @@ impl ProgressTracker {
         }))
     }
 
-    fn with_terminal(
+    fn with_terminal_and_color(
         total_requests: Option<u64>,
         duration: Option<Duration>,
         enabled: bool,
         is_terminal: bool,
+        color_enabled: bool,
     ) -> Self {
         if !enabled || !is_terminal {
             return Self {
@@ -106,25 +128,30 @@ impl ProgressTracker {
                 mode: ProgressMode::Disabled,
                 started_at: Instant::now(),
                 duration,
+                color_enabled: false,
             };
         }
 
         match (total_requests, duration) {
-            (Some(total_requests), _) => Self::request_based(total_requests),
-            (None, Some(duration)) => Self::duration_based(duration),
-            (None, None) => Self::spinner(),
+            (Some(total_requests), _) => Self::request_based(total_requests, color_enabled),
+            (None, Some(duration)) => Self::duration_based(duration, color_enabled),
+            (None, None) => Self::spinner(color_enabled),
         }
     }
 
-    fn request_based(total_requests: u64) -> Self {
+    fn request_based(total_requests: u64, color_enabled: bool) -> Self {
         let bar = IndicatifProgressBar::new(total_requests);
 
+        let template = if color_enabled {
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%) | {prefix}"
+        } else {
+            "{spinner} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%) | {prefix}"
+        };
+
         bar.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%) | {prefix}"
-            )
-            .expect("valid request progress template")
-            .progress_chars("=>-"),
+            ProgressStyle::with_template(template)
+                .expect("valid request progress template")
+                .progress_chars("=>-"),
         );
 
         Self {
@@ -132,20 +159,25 @@ impl ProgressTracker {
             mode: ProgressMode::Requests,
             started_at: Instant::now(),
             duration: None,
+            color_enabled,
         }
     }
 
-    fn duration_based(duration: Duration) -> Self {
+    fn duration_based(duration: Duration, color_enabled: bool) -> Self {
         let total_millis = duration_to_millis(duration);
         let bar = IndicatifProgressBar::new(total_millis);
 
+        let template = if color_enabled {
+            "{spinner:.green} [{elapsed_precise} / {msg}] [{wide_bar:.cyan/blue}] {percent}% | {prefix}"
+        } else {
+            "{spinner} [{elapsed_precise} / {msg}] [{wide_bar}] {percent}% | {prefix}"
+        };
+
         bar.set_message(format_duration(duration));
         bar.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise} / {msg}] [{wide_bar:.cyan/blue}] {percent}% | {prefix}"
-            )
-            .expect("valid duration progress template")
-            .progress_chars("=>-"),
+            ProgressStyle::with_template(template)
+                .expect("valid duration progress template")
+                .progress_chars("=>-"),
         );
 
         Self {
@@ -153,15 +185,21 @@ impl ProgressTracker {
             mode: ProgressMode::Duration,
             started_at: Instant::now(),
             duration: Some(duration),
+            color_enabled,
         }
     }
 
-    fn spinner() -> Self {
+    fn spinner(color_enabled: bool) -> Self {
         let bar = IndicatifProgressBar::new_spinner();
 
+        let template = if color_enabled {
+            "{spinner:.green} [{elapsed_precise}] running | {prefix}"
+        } else {
+            "{spinner} [{elapsed_precise}] running | {prefix}"
+        };
+
         bar.set_style(
-            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] running | {prefix}")
-                .expect("valid spinner progress template"),
+            ProgressStyle::with_template(template).expect("valid spinner progress template"),
         );
         bar.enable_steady_tick(Duration::from_millis(120));
 
@@ -170,6 +208,7 @@ impl ProgressTracker {
             mode: ProgressMode::Spinner,
             started_at: Instant::now(),
             duration: None,
+            color_enabled,
         }
     }
 
@@ -216,21 +255,21 @@ mod tests {
 
     #[test]
     fn disabled_tracker_is_hidden() {
-        let tracker = ProgressTracker::with_terminal(Some(10), None, false, true);
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, false, true, true);
 
         assert!(tracker.is_hidden());
     }
 
     #[test]
     fn non_terminal_tracker_is_hidden() {
-        let tracker = ProgressTracker::with_terminal(Some(10), None, true, false);
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, false, true);
 
         assert!(tracker.is_hidden());
     }
 
     #[test]
     fn request_based_tracker_ticks_position() {
-        let tracker = ProgressTracker::with_terminal(Some(10), None, true, true);
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, true, true);
 
         tracker.tick();
         tracker.tick();
@@ -243,8 +282,13 @@ mod tests {
 
     #[test]
     fn duration_based_tracker_has_duration_length() {
-        let tracker =
-            ProgressTracker::with_terminal(None, Some(Duration::from_secs(5)), true, true);
+        let tracker = ProgressTracker::with_terminal_and_color(
+            None,
+            Some(Duration::from_secs(5)),
+            true,
+            true,
+            true,
+        );
 
         assert_eq!(tracker.length(), Some(5_000));
 
@@ -257,7 +301,7 @@ mod tests {
 
     #[test]
     fn spinner_tracker_ticks_without_panic() {
-        let tracker = ProgressTracker::with_terminal(None, None, true, true);
+        let tracker = ProgressTracker::with_terminal_and_color(None, None, true, true, true);
 
         tracker.tick();
         tracker.finish();
@@ -272,8 +316,13 @@ mod tests {
 
     #[tokio::test]
     async fn duration_ticker_updates_position_and_stops_on_shutdown() {
-        let tracker =
-            ProgressTracker::with_terminal(None, Some(Duration::from_millis(500)), true, true);
+        let tracker = ProgressTracker::with_terminal_and_color(
+            None,
+            Some(Duration::from_millis(500)),
+            true,
+            true,
+            true,
+        );
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -302,8 +351,13 @@ mod tests {
 
     #[test]
     fn disabled_duration_tracker_does_not_spawn_ticker() {
-        let tracker =
-            ProgressTracker::with_terminal(None, Some(Duration::from_millis(500)), false, true);
+        let tracker = ProgressTracker::with_terminal_and_color(
+            None,
+            Some(Duration::from_millis(500)),
+            false,
+            true,
+            true,
+        );
 
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -312,7 +366,7 @@ mod tests {
 
     #[test]
     fn tracker_updates_live_stats_without_panic() {
-        let tracker = ProgressTracker::with_terminal(Some(10), None, true, true);
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, true, true);
 
         let stats = LiveStats::calculate(Duration::from_secs(10), 100, 90, 10, 45.0, 10.0, 120.0);
 
@@ -322,12 +376,32 @@ mod tests {
 
     #[test]
     fn disabled_tracker_ignores_live_stats_update() {
-        let tracker = ProgressTracker::with_terminal(Some(10), None, false, true);
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, false, true, true);
 
         let stats = LiveStats::default();
 
         tracker.update_live_stats(&stats);
 
+        assert!(tracker.is_hidden());
+    }
+
+    #[test]
+    fn tracker_can_disable_color_for_live_stats() {
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, true, false);
+
+        assert!(!tracker.color_enabled());
+
+        let stats = LiveStats::calculate(Duration::from_secs(10), 100, 90, 10, 45.0, 10.0, 120.0);
+
+        tracker.update_live_stats(&stats);
+        tracker.finish();
+    }
+
+    #[test]
+    fn disabled_tracker_forces_color_disabled() {
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, false, true, true);
+
+        assert!(!tracker.color_enabled());
         assert!(tracker.is_hidden());
     }
 }

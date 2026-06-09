@@ -40,6 +40,7 @@ pub struct Engine {
     client: HttpClient,
     stats: Arc<Mutex<StatsCollector>>,
     progress_enabled: bool,
+    color_enabled: bool,
     live_stats_interval: Duration,
 }
 
@@ -61,6 +62,20 @@ impl Engine {
         progress_enabled: bool,
         live_stats_interval: Duration,
     ) -> Result<Self> {
+        Self::new_with_progress_color_and_live_stats_interval(
+            config,
+            progress_enabled,
+            progress_enabled,
+            live_stats_interval,
+        )
+    }
+
+    pub fn new_with_progress_color_and_live_stats_interval(
+        config: EngineConfig,
+        progress_enabled: bool,
+        color_enabled: bool,
+        live_stats_interval: Duration,
+    ) -> Result<Self> {
         if config.url.trim().is_empty() {
             bail!("target URL cannot be empty");
         }
@@ -80,6 +95,7 @@ impl Engine {
             client,
             stats: Arc::new(Mutex::new(StatsCollector::new())),
             progress_enabled,
+            color_enabled: progress_enabled && color_enabled,
             live_stats_interval,
         })
     }
@@ -100,7 +116,8 @@ impl Engine {
     pub async fn run(&self) -> Result<StatsSnapshot> {
         self.reset_timer();
 
-        let progress = ProgressTracker::new(None, None, self.progress_enabled);
+        let progress =
+            ProgressTracker::new_with_color(None, None, self.progress_enabled, self.color_enabled);
 
         self.run_until_shutdown(
             async {
@@ -120,7 +137,12 @@ impl Engine {
 
         self.reset_timer();
 
-        let progress = ProgressTracker::new(None, Some(duration), self.progress_enabled);
+        let progress = ProgressTracker::new_with_color(
+            None,
+            Some(duration),
+            self.progress_enabled,
+            self.color_enabled,
+        );
 
         self.run_until_shutdown(
             async move {
@@ -147,8 +169,12 @@ impl Engine {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let remaining_requests = Arc::new(AtomicUsize::new(total_requests));
-        let progress =
-            ProgressTracker::new(Some(total_requests as u64), None, self.progress_enabled);
+        let progress = ProgressTracker::new_with_color(
+            Some(total_requests as u64),
+            None,
+            self.progress_enabled,
+            self.color_enabled,
+        );
 
         let handles = self.spawn_workers(
             Arc::clone(&shutdown),

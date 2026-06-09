@@ -3,8 +3,9 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clank_cli::config::parse_duration;
 use clank_cli::engine::{Engine, EngineConfig};
-use clank_cli::stats::format_summary;
+use clank_cli::stats::format_summary_with_color;
 use clap::Parser;
+use console::Term;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -42,6 +43,9 @@ struct Cli {
 
     #[arg(long, default_value_t = 1_000)]
     stats_interval_ms: u64,
+
+    #[arg(long)]
+    no_color: bool,
 }
 
 #[tokio::main]
@@ -66,10 +70,15 @@ async fn main() -> Result<()> {
         timeout: Duration::from_secs(cli.timeout_secs),
     };
 
-    let engine = Engine::new_with_progress_and_live_stats_interval(
+    let progress_enabled = !cli.quiet;
+    let output_color_enabled = color_enabled(cli.no_color);
+    let stats_interval = Duration::from_millis(cli.stats_interval_ms);
+
+    let engine = Engine::new_with_progress_color_and_live_stats_interval(
         config,
-        !cli.quiet,
-        Duration::from_millis(cli.stats_interval_ms),
+        progress_enabled,
+        output_color_enabled,
+        stats_interval,
     )?;
 
     let snapshot = if let Some(total_requests) = cli.requests {
@@ -81,7 +90,10 @@ async fn main() -> Result<()> {
         engine.run().await?
     };
 
-    println!("{}", format_summary(&snapshot));
+    println!(
+        "{}",
+        format_summary_with_color(&snapshot, output_color_enabled)
+    );
 
     Ok(())
 }
@@ -98,4 +110,8 @@ fn resolve_url(cli: &Cli) -> Result<String> {
 
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
+}
+
+fn color_enabled(no_color: bool) -> bool {
+    !no_color && std::env::var_os("NO_COLOR").is_none() && Term::stdout().is_term()
 }
