@@ -44,6 +44,12 @@ pub struct Engine {
     live_stats_interval: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownReason {
+    Completed,
+    Interrupted,
+}
+
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Self> {
         Self::new_with_progress(config, false)
@@ -119,15 +125,8 @@ impl Engine {
         let progress =
             ProgressTracker::new_with_color(None, None, self.progress_enabled, self.color_enabled);
 
-        self.run_until_shutdown(
-            async {
-                tokio::signal::ctrl_c()
-                    .await
-                    .context("failed to listen for Ctrl+C signal")
-            },
-            progress,
-        )
-        .await
+        self.run_until_shutdown(wait_for_interrupt_signal(), progress)
+            .await
     }
 
     pub async fn run_for_duration(&self, duration: Duration) -> Result<StatsSnapshot> {
@@ -147,11 +146,11 @@ impl Engine {
         self.run_until_shutdown(
             async move {
                 tokio::select! {
-                    result = tokio::signal::ctrl_c() => {
-                        result.context("failed to listen for Ctrl+C signal")
+                    result = wait_for_interrupt_signal() => {
+                        result
                     }
                     _ = timeout(duration, std::future::pending::<()>()) => {
-                        Ok(())
+                        Ok(ShutdownReason::Completed)
                     }
                 }
             },
@@ -185,27 +184,42 @@ impl Engine {
         let live_stats_handle =
             self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
 
-        let mut task_error = None;
+        let interrupt_signal = wait_for_interrupt_signal();
+        tokio::pin!(interrupt_signal);
 
-        for handle in handles {
-            if let Err(error) = handle.await.context("executor task failed") {
-                if task_error.is_none() {
-                    task_error = Some(error);
-                }
+        let reason = loop {
+            if handles.iter().all(JoinHandle::is_finished) {
+                break ShutdownReason::Completed;
             }
-        }
+
+            tokio::select! {
+                result = &mut interrupt_signal => {
+                    break result?;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        };
+
+        let force_quit_handle = if reason == ShutdownReason::Interrupted {
+            Some(spawn_force_quit_guard())
+        } else {
+            None
+        };
 
         shutdown.store(true, Ordering::SeqCst);
+
+        join_worker_handles(handles, "executor task failed").await?;
 
         if let Some(handle) = live_stats_handle {
             let _ = handle.await;
         }
 
-        progress.finish();
-
-        if let Some(error) = task_error {
-            return Err(error);
+        if let Some(handle) = force_quit_handle {
+            handle.abort();
+            let _ = handle.await;
         }
+
+        finish_progress(&progress, reason);
 
         Ok(self.snapshot())
     }
@@ -216,7 +230,7 @@ impl Engine {
         progress: ProgressTracker,
     ) -> Result<StatsSnapshot>
     where
-        S: Future<Output = Result<()>>,
+        S: Future<Output = Result<ShutdownReason>>,
     {
         let shutdown = Arc::new(AtomicBool::new(false));
         let progress_ticker = progress.spawn_duration_ticker(Arc::clone(&shutdown));
@@ -224,22 +238,17 @@ impl Engine {
             self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
         let handles = self.spawn_workers(Arc::clone(&shutdown), None, progress.clone());
 
-        let signal_result = shutdown_signal.await;
+        let reason = shutdown_signal.await?;
+
+        let force_quit_handle = if reason == ShutdownReason::Interrupted {
+            Some(spawn_force_quit_guard())
+        } else {
+            None
+        };
 
         shutdown.store(true, Ordering::SeqCst);
 
-        let mut task_error = None;
-
-        for handle in handles {
-            if let Err(error) = handle
-                .await
-                .context("executor task failed while shutting down")
-            {
-                if task_error.is_none() {
-                    task_error = Some(error);
-                }
-            }
-        }
+        join_worker_handles(handles, "executor task failed while shutting down").await?;
 
         if let Some(handle) = progress_ticker {
             let _ = handle.await;
@@ -249,13 +258,12 @@ impl Engine {
             let _ = handle.await;
         }
 
-        progress.finish();
-
-        if let Some(error) = task_error {
-            return Err(error);
+        if let Some(handle) = force_quit_handle {
+            handle.abort();
+            let _ = handle.await;
         }
 
-        signal_result?;
+        finish_progress(&progress, reason);
 
         Ok(self.snapshot())
     }
@@ -386,6 +394,57 @@ fn error_category(kind: HttpErrorKind) -> ErrorCategory {
     }
 }
 
+async fn wait_for_interrupt_signal() -> Result<ShutdownReason> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl+C signal")?;
+
+    eprintln!("Shutting down... (press Ctrl+C again to force quit)");
+
+    Ok(ShutdownReason::Interrupted)
+}
+
+fn spawn_force_quit_guard() -> JoinHandle<()> {
+    tokio::spawn(async {
+        let second_signal =
+            tokio::time::timeout(force_quit_window(), tokio::signal::ctrl_c()).await;
+
+        if let Ok(Ok(())) = second_signal {
+            eprintln!("Force quit.");
+            std::process::exit(130);
+        }
+    })
+}
+
+fn force_quit_window() -> Duration {
+    Duration::from_secs(2)
+}
+
+async fn join_worker_handles(handles: Vec<JoinHandle<()>>, context: &'static str) -> Result<()> {
+    let mut task_error = None;
+
+    for handle in handles {
+        if let Err(error) = handle.await.context(context) {
+            if task_error.is_none() {
+                task_error = Some(error);
+            }
+        }
+    }
+
+    if let Some(error) = task_error {
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn finish_progress(progress: &ProgressTracker, reason: ShutdownReason) {
+    match reason {
+        ShutdownReason::Completed => progress.finish(),
+        ShutdownReason::Interrupted => progress.finish_interrupted(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,7 +527,7 @@ mod tests {
             .run_until_shutdown(
                 async {
                     tokio::time::sleep(Duration::from_millis(20)).await;
-                    Ok(())
+                    Ok(ShutdownReason::Interrupted)
                 },
                 progress,
             )
@@ -773,6 +832,74 @@ mod tests {
                 .spawn_live_stats_updater(shutdown, progress)
                 .is_none()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn force_quit_window_is_two_seconds() {
+        assert_eq!(force_quit_window(), Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn run_until_shutdown_returns_final_snapshot_after_interrupt() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/interrupt");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/interrupt"),
+            method: "GET".to_string(),
+            body: None,
+            concurrency: 5,
+            timeout: Duration::from_secs(1),
+        };
+
+        let engine = Engine::new(config)?;
+        let progress = ProgressTracker::new(None, None, false);
+
+        let snapshot = engine
+            .run_until_shutdown(
+                async {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok(ShutdownReason::Interrupted)
+                },
+                progress,
+            )
+            .await?;
+
+        assert_eq!(snapshot.total_errors, 0);
+        assert!(snapshot.total_requests > 0);
+        assert_eq!(mock.calls_async().await as u64, snapshot.total_requests);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_returns_final_snapshot_after_completed_workers() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/completed");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig::new(server.url("/completed"), 5);
+        let engine = Engine::new(config)?;
+
+        let snapshot = engine.run_for_requests(20).await?;
+
+        assert_eq!(snapshot.total_requests, 20);
+        assert_eq!(snapshot.successful_requests, 20);
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(mock.calls_async().await, 20);
 
         Ok(())
     }

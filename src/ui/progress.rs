@@ -8,7 +8,7 @@ use console::Term;
 use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
-use crate::ui::{LiveStats, format_live_with_color};
+use crate::ui::{LiveStats, format_live_with_color, warning};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -222,6 +222,24 @@ impl ProgressTracker {
 
         self.bar.set_position(elapsed_millis);
     }
+
+    pub fn finish_interrupted(&self) {
+        if self.bar.is_hidden() {
+            return;
+        }
+
+        if self.mode == ProgressMode::Duration {
+            self.update_duration_position();
+        }
+
+        let message = if self.color_enabled {
+            warning("interrupted")
+        } else {
+            "interrupted".to_string()
+        };
+
+        self.bar.finish_with_message(message);
+    }
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -403,5 +421,13 @@ mod tests {
 
         assert!(!tracker.color_enabled());
         assert!(tracker.is_hidden());
+    }
+
+    #[test]
+    fn tracker_finishes_interrupted_without_panic() {
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, true, false);
+
+        tracker.tick();
+        tracker.finish_interrupted();
     }
 }

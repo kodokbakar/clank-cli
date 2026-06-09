@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
     } else if let Some(duration) = cli.duration {
         engine.run_for_duration(duration).await?
     } else {
-        println!("Running load test. Press Ctrl+C to stop.");
+        eprintln!("Running load test. Press Ctrl+C to stop.");
         engine.run().await?
     };
 
