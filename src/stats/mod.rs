@@ -287,6 +287,8 @@ pub fn format_summary_with_color(snapshot: &StatsSnapshot, color_enabled: bool) 
     let duration_secs = snapshot.duration.as_secs_f64();
     let throughput = snapshot.throughput.requests_per_second;
 
+    let total_requests_line = format_number(total_requests);
+
     let successful_line = maybe_color(
         &format!(
             "{} ({:.1}%)",
@@ -355,40 +357,24 @@ pub fn format_summary_with_color(snapshot: &StatsSnapshot, color_enabled: bool) 
         "\
 Results:
 ────────────────────────────────
-Total Requests:    {}
-Successful:        {}
-Errors:            {}
-  Timeout:         {}
-  Connection:      {}
-  HTTP 4xx:        {}
-  HTTP 5xx:        {}
-  HTTP Other:      {}
-  Other:           {}
+Total Requests:    {total_requests_line}
+Successful:        {successful_line}
+Errors:            {errors_line}
+  Timeout:         {timeout_count}
+  Connection:      {connection_count}
+  HTTP 4xx:        {http_4xx_count}
+  HTTP 5xx:        {http_5xx_count}
+  HTTP Other:      {http_other_count}
+  Other:           {other_count}
 ────────────────────────────────
-Latency (avg):     {:.1}ms
-Latency (p50):     {:.1}ms
-Latency (p95):     {:.1}ms
-Latency (p99):     {}
-Latency (p999):    {:.1}ms
-Throughput:        {}
-Duration:          {:.2}s
-────────────────────────────────",
-        format_number(total_requests),
-        successful_line,
-        errors_line,
-        timeout_count,
-        connection_count,
-        http_4xx_count,
-        http_5xx_count,
-        http_other_count,
-        other_count,
-        avg_latency_ms,
-        p50_ms,
-        p95_ms,
-        p99_line,
-        p999_ms,
-        throughput_line,
-        duration_secs
+Latency (avg):     {avg_latency_ms:.1}ms
+Latency (p50):     {p50_ms:.1}ms
+Latency (p95):     {p95_ms:.1}ms
+Latency (p99):     {p99_line}
+Latency (p999):    {p999_ms:.1}ms
+Throughput:        {throughput_line}
+Duration:          {duration_secs:.2}s
+────────────────────────────────"
     )
 }
 

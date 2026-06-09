@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use console::Term;
 use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
-use crate::ui::{LiveStats, format_live_with_color, warning};
+use crate::ui::{EtaEstimator, LiveStats, format_live_with_color, warning};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -25,6 +25,7 @@ pub struct ProgressTracker {
     started_at: Instant,
     duration: Option<Duration>,
     color_enabled: bool,
+    eta: Option<Arc<Mutex<EtaEstimator>>>,
 }
 
 impl ProgressTracker {
@@ -50,7 +51,10 @@ impl ProgressTracker {
     pub fn tick(&self) {
         match self.mode {
             ProgressMode::Disabled => {}
-            ProgressMode::Requests => self.bar.inc(1),
+            ProgressMode::Requests => {
+                self.bar.inc(1);
+                self.update_eta(self.bar.position());
+            }
             ProgressMode::Duration => self.update_duration_position(),
             ProgressMode::Spinner => self.bar.tick(),
         }
@@ -129,6 +133,7 @@ impl ProgressTracker {
                 started_at: Instant::now(),
                 duration,
                 color_enabled: false,
+                eta: None,
             };
         }
 
@@ -143,9 +148,9 @@ impl ProgressTracker {
         let bar = IndicatifProgressBar::new(total_requests);
 
         let template = if color_enabled {
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%) | {prefix}"
+            "{spinner:.green} [{elapsed_precise} / {msg}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%) | {prefix}"
         } else {
-            "{spinner} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({percent}%) | {prefix}"
+            "{spinner} [{elapsed_precise} / {msg}] [{wide_bar}] {pos}/{len} ({percent}%) | {prefix}"
         };
 
         bar.set_style(
@@ -153,6 +158,7 @@ impl ProgressTracker {
                 .expect("valid request progress template")
                 .progress_chars("=>-"),
         );
+        bar.set_message("ETA --:--");
 
         Self {
             bar,
@@ -160,6 +166,9 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: None,
             color_enabled,
+            eta: Some(Arc::new(Mutex::new(EtaEstimator::new(Some(
+                total_requests,
+            ))))),
         }
     }
 
@@ -173,7 +182,7 @@ impl ProgressTracker {
             "{spinner} [{elapsed_precise} / {msg}] [{wide_bar}] {percent}% | {prefix}"
         };
 
-        bar.set_message(format_duration(duration));
+        bar.set_message("ETA --:--");
         bar.set_style(
             ProgressStyle::with_template(template)
                 .expect("valid duration progress template")
@@ -186,6 +195,7 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: Some(duration),
             color_enabled,
+            eta: Some(Arc::new(Mutex::new(EtaEstimator::new(Some(total_millis))))),
         }
     }
 
@@ -209,6 +219,7 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: None,
             color_enabled,
+            eta: None,
         }
     }
 
@@ -221,6 +232,18 @@ impl ProgressTracker {
         let elapsed_millis = duration_to_millis(self.started_at.elapsed()).min(total_millis);
 
         self.bar.set_position(elapsed_millis);
+        self.update_eta(elapsed_millis);
+    }
+
+    fn update_eta(&self, completed: u64) {
+        let Some(eta) = self.eta.as_ref() else {
+            return;
+        };
+
+        let mut eta = lock_eta(eta.as_ref());
+        eta.update(completed);
+
+        self.bar.set_message(eta.formatted_eta());
     }
 
     pub fn finish_interrupted(&self) {
@@ -242,6 +265,13 @@ impl ProgressTracker {
     }
 }
 
+fn lock_eta(eta: &Mutex<EtaEstimator>) -> MutexGuard<'_, EtaEstimator> {
+    match eta.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn duration_to_millis(duration: Duration) -> u64 {
     let millis = duration.as_millis();
 
@@ -251,19 +281,6 @@ fn duration_to_millis(duration: Duration) -> u64 {
         u64::MAX
     } else {
         millis as u64
-    }
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    let hours = total_secs / 3_600;
-    let minutes = (total_secs % 3_600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
     }
 }
 
@@ -323,13 +340,6 @@ mod tests {
 
         tracker.tick();
         tracker.finish();
-    }
-
-    #[test]
-    fn format_duration_formats_seconds_minutes_and_hours() {
-        assert_eq!(format_duration(Duration::from_secs(30)), "00:30");
-        assert_eq!(format_duration(Duration::from_secs(90)), "01:30");
-        assert_eq!(format_duration(Duration::from_secs(3_900)), "01:05:00");
     }
 
     #[tokio::test]
@@ -429,5 +439,41 @@ mod tests {
 
         tracker.tick();
         tracker.finish_interrupted();
+    }
+
+    #[test]
+    fn request_tracker_updates_eta_on_tick() {
+        let tracker = ProgressTracker::with_terminal_and_color(Some(10), None, true, true, true);
+
+        tracker.tick();
+
+        assert_eq!(tracker.position(), 1);
+
+        tracker.finish();
+    }
+
+    #[test]
+    fn duration_tracker_updates_eta_on_tick() {
+        let tracker = ProgressTracker::with_terminal_and_color(
+            None,
+            Some(Duration::from_millis(500)),
+            true,
+            true,
+            true,
+        );
+
+        tracker.tick();
+
+        assert!(tracker.position() <= 500);
+
+        tracker.finish();
+    }
+
+    #[test]
+    fn spinner_tracker_has_no_eta() {
+        let tracker = ProgressTracker::with_terminal_and_color(None, None, true, true, true);
+
+        tracker.tick();
+        tracker.finish();
     }
 }
