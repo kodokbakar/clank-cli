@@ -8,6 +8,8 @@ use console::Term;
 use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
+use crate::ui::{LiveStats, format_live};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
     Disabled,
@@ -36,6 +38,14 @@ impl ProgressTracker {
             ProgressMode::Duration => self.update_duration_position(),
             ProgressMode::Spinner => self.bar.tick(),
         }
+    }
+
+    pub fn update_live_stats(&self, stats: &LiveStats) {
+        if self.mode == ProgressMode::Disabled {
+            return;
+        }
+
+        self.bar.set_prefix(format_live(stats));
     }
 
     pub fn finish(&self) {
@@ -111,7 +121,7 @@ impl ProgressTracker {
 
         bar.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%)",
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%) | {prefix}"
             )
             .expect("valid request progress template")
             .progress_chars("=>-"),
@@ -132,7 +142,7 @@ impl ProgressTracker {
         bar.set_message(format_duration(duration));
         bar.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise} / {msg}] [{wide_bar:.cyan/blue}] {percent}%",
+                "{spinner:.green} [{elapsed_precise} / {msg}] [{wide_bar:.cyan/blue}] {percent}% | {prefix}"
             )
             .expect("valid duration progress template")
             .progress_chars("=>-"),
@@ -150,7 +160,7 @@ impl ProgressTracker {
         let bar = IndicatifProgressBar::new_spinner();
 
         bar.set_style(
-            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] running")
+            ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] running | {prefix}")
                 .expect("valid spinner progress template"),
         );
         bar.enable_steady_tick(Duration::from_millis(120));
@@ -298,5 +308,26 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
 
         assert!(tracker.spawn_duration_ticker(shutdown).is_none());
+    }
+
+    #[test]
+    fn tracker_updates_live_stats_without_panic() {
+        let tracker = ProgressTracker::with_terminal(Some(10), None, true, true);
+
+        let stats = LiveStats::calculate(Duration::from_secs(10), 100, 90, 10, 45.0, 10.0, 120.0);
+
+        tracker.update_live_stats(&stats);
+        tracker.finish();
+    }
+
+    #[test]
+    fn disabled_tracker_ignores_live_stats_update() {
+        let tracker = ProgressTracker::with_terminal(Some(10), None, false, true);
+
+        let stats = LiveStats::default();
+
+        tracker.update_live_stats(&stats);
+
+        assert!(tracker.is_hidden());
     }
 }

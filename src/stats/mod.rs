@@ -3,6 +3,8 @@ pub mod histogram;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use crate::ui::LiveStats;
+
 pub use histogram::HdrHistogram;
 
 const MAX_STORED_ERRORS: usize = 100;
@@ -216,6 +218,50 @@ impl StatsCollector {
             throughput,
             errors: self.errors.clone(),
         }
+    }
+
+    pub fn live_snapshot(&self) -> LiveStats {
+        LiveStats {
+            elapsed: self.started_at.elapsed(),
+            total_requests: self.total_requests,
+            successful: self.successful_requests,
+            errors: self.total_errors,
+            current_rps: self.current_rps(),
+            avg_latency_ms: self.avg_latency_ms(),
+            min_latency_ms: self.min_latency_ms(),
+            max_latency_ms: self.max_latency_ms(),
+        }
+    }
+
+    pub fn current_rps(&self) -> f64 {
+        let elapsed_secs = self.started_at.elapsed().as_secs_f64();
+
+        if elapsed_secs > 0.0 {
+            self.total_requests as f64 / elapsed_secs
+        } else {
+            0.0
+        }
+    }
+
+    fn avg_latency_ms(&self) -> f64 {
+        self.histogram
+            .mean()
+            .map(|duration| duration.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
+    fn min_latency_ms(&self) -> f64 {
+        self.histogram
+            .min()
+            .map(|duration| duration.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
+    fn max_latency_ms(&self) -> f64 {
+        self.histogram
+            .max()
+            .map(|duration| duration.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
     }
 }
 
@@ -625,5 +671,48 @@ mod tests {
         assert_eq!(snapshot.error_counts.http_5xx, 0);
         assert_eq!(snapshot.error_counts.http_other, 1);
         assert_eq!(snapshot.error_counts.other, 0);
+    }
+
+    #[test]
+    fn live_snapshot_returns_current_stats_without_cloning_snapshot_histogram() {
+        let mut stats = StatsCollector::new();
+
+        stats.record(Duration::from_millis(10), 200);
+        stats.record(Duration::from_millis(20), 200);
+        stats.record(Duration::from_millis(30), 503);
+        stats.record_error(ErrorCategory::Connection, "connection refused");
+
+        let live = stats.live_snapshot();
+
+        assert_eq!(live.total_requests, 4);
+        assert_eq!(live.successful, 2);
+        assert_eq!(live.errors, 2);
+        assert!(live.current_rps > 0.0);
+        assert!(live.avg_latency_ms > 0.0);
+        assert!(live.min_latency_ms > 0.0);
+        assert!(live.max_latency_ms >= live.min_latency_ms);
+    }
+
+    #[test]
+    fn current_rps_returns_zero_when_no_requests_recorded() {
+        let stats = StatsCollector::new();
+
+        assert_eq!(stats.current_rps(), 0.0);
+    }
+
+    #[test]
+    fn live_snapshot_handles_empty_latency_histogram() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_error(ErrorCategory::Timeout, "request timed out");
+
+        let live = stats.live_snapshot();
+
+        assert_eq!(live.total_requests, 1);
+        assert_eq!(live.successful, 0);
+        assert_eq!(live.errors, 1);
+        assert_eq!(live.avg_latency_ms, 0.0);
+        assert_eq!(live.min_latency_ms, 0.0);
+        assert_eq!(live.max_latency_ms, 0.0);
     }
 }

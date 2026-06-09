@@ -4,7 +4,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::task::JoinHandle;
@@ -40,6 +40,7 @@ pub struct Engine {
     client: HttpClient,
     stats: Arc<Mutex<StatsCollector>>,
     progress_enabled: bool,
+    live_stats_interval: Duration,
 }
 
 impl Engine {
@@ -48,12 +49,28 @@ impl Engine {
     }
 
     pub fn new_with_progress(config: EngineConfig, progress_enabled: bool) -> Result<Self> {
+        Self::new_with_progress_and_live_stats_interval(
+            config,
+            progress_enabled,
+            Duration::from_secs(1),
+        )
+    }
+
+    pub fn new_with_progress_and_live_stats_interval(
+        config: EngineConfig,
+        progress_enabled: bool,
+        live_stats_interval: Duration,
+    ) -> Result<Self> {
         if config.url.trim().is_empty() {
             bail!("target URL cannot be empty");
         }
 
         if config.concurrency == 0 {
             bail!("concurrency must be greater than 0");
+        }
+
+        if live_stats_interval.is_zero() {
+            bail!("live stats interval must be greater than 0");
         }
 
         let client = HttpClient::new(config.timeout)?;
@@ -63,6 +80,7 @@ impl Engine {
             client,
             stats: Arc::new(Mutex::new(StatsCollector::new())),
             progress_enabled,
+            live_stats_interval,
         })
     }
 
@@ -138,6 +156,9 @@ impl Engine {
             progress.clone(),
         );
 
+        let live_stats_handle =
+            self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
+
         let mut task_error = None;
 
         for handle in handles {
@@ -146,6 +167,12 @@ impl Engine {
                     task_error = Some(error);
                 }
             }
+        }
+
+        shutdown.store(true, Ordering::SeqCst);
+
+        if let Some(handle) = live_stats_handle {
+            let _ = handle.await;
         }
 
         progress.finish();
@@ -167,6 +194,8 @@ impl Engine {
     {
         let shutdown = Arc::new(AtomicBool::new(false));
         let progress_ticker = progress.spawn_duration_ticker(Arc::clone(&shutdown));
+        let live_stats_handle =
+            self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
         let handles = self.spawn_workers(Arc::clone(&shutdown), None, progress.clone());
 
         let signal_result = shutdown_signal.await;
@@ -187,6 +216,10 @@ impl Engine {
         }
 
         if let Some(handle) = progress_ticker {
+            let _ = handle.await;
+        }
+
+        if let Some(handle) = live_stats_handle {
             let _ = handle.await;
         }
 
@@ -261,6 +294,52 @@ impl Engine {
         }
 
         handles
+    }
+
+    fn spawn_live_stats_updater(
+        &self,
+        shutdown: Arc<AtomicBool>,
+        progress: ProgressTracker,
+    ) -> Option<JoinHandle<()>> {
+        if !self.progress_enabled {
+            return None;
+        }
+
+        let stats = Arc::clone(&self.stats);
+        let interval = self.live_stats_interval;
+
+        Some(tokio::spawn(async move {
+            let poll_interval = Duration::from_millis(100);
+            let mut next_update = Instant::now();
+
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let now = Instant::now();
+
+                if now >= next_update {
+                    let live_stats = {
+                        let stats = lock_stats(stats.as_ref());
+                        stats.live_snapshot()
+                    };
+
+                    progress.update_live_stats(&live_stats);
+
+                    next_update = now + interval;
+                }
+
+                tokio::time::sleep(poll_interval.min(interval)).await;
+            }
+
+            let live_stats = {
+                let stats = lock_stats(stats.as_ref());
+                stats.live_snapshot()
+            };
+
+            progress.update_live_stats(&live_stats);
+        }))
     }
 }
 
@@ -610,6 +689,64 @@ mod tests {
         assert_eq!(snapshot.error_counts.other, 0);
         assert_eq!(snapshot.error_counts.total(), 8_000);
         assert_eq!(snapshot.histogram.len(), 6_000);
+
+        Ok(())
+    }
+
+    #[test]
+    fn zero_live_stats_interval_returns_error() {
+        let config = EngineConfig::new("http://example.com", 1);
+
+        let result =
+            Engine::new_with_progress_and_live_stats_interval(config, true, Duration::ZERO);
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn live_stats_updater_stops_without_leaking_task() -> Result<()> {
+        let config = EngineConfig {
+            url: "http://127.0.0.1:1/unreachable".to_string(),
+            method: "GET".to_string(),
+            body: None,
+            concurrency: 1,
+            timeout: Duration::from_millis(50),
+        };
+
+        let engine = Engine::new_with_progress_and_live_stats_interval(
+            config,
+            true,
+            Duration::from_millis(10),
+        )?;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let progress = ProgressTracker::new(None, None, false);
+
+        let handle = engine
+            .spawn_live_stats_updater(Arc::clone(&shutdown), progress)
+            .expect("live stats updater should spawn when progress is enabled");
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        shutdown.store(true, Ordering::SeqCst);
+
+        handle.await.context("live stats updater task failed")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn live_stats_updater_does_not_spawn_when_progress_disabled() -> Result<()> {
+        let config = EngineConfig::new("http://example.com", 1);
+        let engine = Engine::new_with_progress(config, false)?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let progress = ProgressTracker::new(None, None, false);
+
+        assert!(
+            engine
+                .spawn_live_stats_updater(shutdown, progress)
+                .is_none()
+        );
 
         Ok(())
     }

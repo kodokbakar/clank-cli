@@ -39,6 +39,9 @@ struct Cli {
 
     #[arg(short, long)]
     quiet: bool,
+
+    #[arg(long, default_value_t = 1_000)]
+    stats_interval_ms: u64,
 }
 
 #[tokio::main]
@@ -47,6 +50,10 @@ async fn main() -> Result<()> {
 
     if cli.requests.is_some() && cli.duration.is_some() {
         bail!("use either --requests or --duration, not both");
+    }
+
+    if cli.stats_interval_ms == 0 {
+        bail!("--stats-interval-ms must be greater than 0");
     }
 
     let url = resolve_url(&cli)?;
@@ -59,7 +66,11 @@ async fn main() -> Result<()> {
         timeout: Duration::from_secs(cli.timeout_secs),
     };
 
-    let engine = Engine::new_with_progress(config, !cli.quiet)?;
+    let engine = Engine::new_with_progress_and_live_stats_interval(
+        config,
+        !cli.quiet,
+        Duration::from_millis(cli.stats_interval_ms),
+    )?;
 
     let snapshot = if let Some(total_requests) = cli.requests {
         engine.run_for_requests(total_requests).await?
