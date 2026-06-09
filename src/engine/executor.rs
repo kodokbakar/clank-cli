@@ -18,8 +18,10 @@ pub struct EngineConfig {
     pub url: String,
     pub method: String,
     pub body: Option<String>,
+    pub headers: Vec<(String, String)>,
     pub concurrency: usize,
     pub timeout: Duration,
+    pub insecure: bool,
 }
 
 impl EngineConfig {
@@ -28,8 +30,10 @@ impl EngineConfig {
             url: url.into(),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency,
             timeout: Duration::from_secs(10),
+            insecure: false,
         }
     }
 }
@@ -94,7 +98,7 @@ impl Engine {
             bail!("live stats interval must be greater than 0");
         }
 
-        let client = HttpClient::new(config.timeout)?;
+        let client = HttpClient::new(config.timeout, config.insecure)?;
 
         Ok(Self {
             config,
@@ -284,6 +288,7 @@ impl Engine {
             let method = self.config.method.clone();
             let url = self.config.url.clone();
             let body = self.config.body.clone();
+            let headers = self.config.headers.clone();
 
             let progress = progress.clone();
 
@@ -305,7 +310,7 @@ impl Engine {
                         }
                     }
 
-                    let result = client.send(&method, &url, body.clone()).await;
+                    let result = client.send(&method, &url, body.clone(), &headers).await;
 
                     match result {
                         Ok(response) => {
@@ -482,8 +487,10 @@ mod tests {
             url: "http://127.0.0.1:1/unreachable".to_string(),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 10,
             timeout: Duration::from_millis(300),
+            insecure: false,
         };
 
         let engine = Engine::new(config)?;
@@ -516,8 +523,10 @@ mod tests {
             url: server.url("/shutdown"),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
+            insecure: false,
         };
 
         let engine = Engine::new(config)?;
@@ -563,8 +572,10 @@ mod tests {
             url: server.url("/duration"),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
+            insecure: false,
         };
 
         let engine = Engine::new(config)?;
@@ -650,8 +661,10 @@ mod tests {
             url: server.url("/slow"),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 5,
             timeout: Duration::from_millis(50),
+            insecure: false,
         };
 
         let engine = Engine::new(config)?;
@@ -794,8 +807,10 @@ mod tests {
             url: "http://127.0.0.1:1/unreachable".to_string(),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 1,
             timeout: Duration::from_millis(50),
+            insecure: false,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -856,8 +871,10 @@ mod tests {
             url: server.url("/interrupt"),
             method: "GET".to_string(),
             body: None,
+            headers: Vec::new(),
             concurrency: 5,
             timeout: Duration::from_secs(1),
+            insecure: false,
         };
 
         let engine = Engine::new(config)?;
@@ -900,6 +917,40 @@ mod tests {
         assert_eq!(snapshot.successful_requests, 20);
         assert_eq!(snapshot.total_errors, 0);
         assert_eq!(mock.calls_async().await, 20);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_sends_custom_headers() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/headers")
+                    .header("authorization", "Bearer token123");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/headers"),
+            method: "GET".to_string(),
+            body: None,
+            headers: vec![("Authorization".to_string(), "Bearer token123".to_string())],
+            concurrency: 2,
+            timeout: Duration::from_secs(1),
+            insecure: false,
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_requests(5).await?;
+
+        assert_eq!(snapshot.total_requests, 5);
+        assert_eq!(snapshot.successful_requests, 5);
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(mock.calls_async().await, 5);
 
         Ok(())
     }

@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clank_cli::config::parse_duration;
+use clank_cli::config::{parse_duration, parse_header, validate_method};
 use clank_cli::engine::{Engine, EngineConfig};
 use clank_cli::stats::format_summary_with_color;
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use console::Term;
 
 #[derive(Debug, Parser)]
@@ -20,11 +20,14 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     url: Option<String>,
 
-    #[arg(short = 'X', long, default_value = "GET")]
+    #[arg(short = 'X', long, default_value = "GET", value_name = "METHOD")]
     method: String,
 
     #[arg(long)]
     body: Option<String>,
+
+    #[arg(short = 'H', long = "header", value_name = "KEY: VALUE", action = ArgAction::Append)]
+    headers: Vec<String>,
 
     #[arg(short, long, default_value_t = 10)]
     concurrency: usize,
@@ -37,6 +40,9 @@ struct Cli {
 
     #[arg(long, default_value_t = 10)]
     timeout_secs: u64,
+
+    #[arg(short = 'k', long)]
+    insecure: bool,
 
     #[arg(short, long)]
     quiet: bool,
@@ -62,12 +68,17 @@ async fn main() -> Result<()> {
 
     let url = resolve_url(&cli)?;
 
+    let method = validate_method(&cli.method)?;
+    let headers = parse_headers(&cli.headers)?;
+
     let config = EngineConfig {
         url,
-        method: cli.method,
+        method,
         body: cli.body,
+        headers,
         concurrency: cli.concurrency,
         timeout: Duration::from_secs(cli.timeout_secs),
+        insecure: cli.insecure,
     };
 
     let progress_enabled = !cli.quiet;
@@ -110,6 +121,10 @@ fn resolve_url(cli: &Cli) -> Result<String> {
 
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
+}
+
+fn parse_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
+    headers.iter().map(|header| parse_header(header)).collect()
 }
 
 fn color_enabled(no_color: bool) -> bool {

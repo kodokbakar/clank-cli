@@ -3,7 +3,10 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use reqwest::{Client, StatusCode, header::HeaderMap};
+use reqwest::{
+    Client, Method, StatusCode,
+    header::{HeaderMap, HeaderName, HeaderValue},
+};
 
 #[derive(Debug, Clone)]
 pub struct HttpClient {
@@ -55,9 +58,10 @@ impl fmt::Display for HttpClientError {
 impl Error for HttpClientError {}
 
 impl HttpClient {
-    pub fn new(timeout: Duration) -> Result<Self> {
+    pub fn new(timeout: Duration, insecure: bool) -> Result<Self> {
         let client = Client::builder()
             .timeout(timeout)
+            .danger_accept_invalid_certs(insecure)
             .build()
             .context("failed to build HTTP client")?;
 
@@ -69,26 +73,34 @@ impl HttpClient {
         method: &str,
         url: &str,
         body: Option<String>,
+        headers: &[(String, String)],
     ) -> std::result::Result<HttpResponse, HttpClientError> {
         let normalized_method = method.to_ascii_uppercase();
 
         let request = match normalized_method.as_str() {
             "GET" => self.client.get(url),
-            "POST" => {
-                let request = self.client.post(url);
-
-                match body {
-                    Some(body) => request.body(body),
-                    None => request,
-                }
-            }
+            "POST" => self.client.post(url),
+            "PUT" => self.client.put(url),
+            "DELETE" => self.client.delete(url),
+            "PATCH" => self.client.patch(url),
+            "HEAD" => self.client.head(url),
+            "OPTIONS" => self.client.request(Method::OPTIONS, url),
             _ => {
                 return Err(HttpClientError::new(
                     HttpErrorKind::UnsupportedMethod,
-                    format!("unsupported HTTP method: {method}. Supported methods: GET, POST"),
+                    format!(
+                        "unsupported HTTP method: {method}. Supported methods: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
+                    ),
                 ));
             }
         };
+
+        let request = match body {
+            Some(body) => request.body(body),
+            None => request,
+        };
+
+        let request = apply_headers(request, headers)?;
 
         let started_at = Instant::now();
 
@@ -108,6 +120,31 @@ impl HttpClient {
             latency,
         })
     }
+}
+
+fn apply_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> std::result::Result<reqwest::RequestBuilder, HttpClientError> {
+    for (key, value) in headers {
+        let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
+            HttpClientError::new(
+                HttpErrorKind::Request,
+                format!("invalid header name `{key}`: {error}"),
+            )
+        })?;
+
+        let value = HeaderValue::from_str(value).map_err(|error| {
+            HttpClientError::new(
+                HttpErrorKind::Request,
+                format!("invalid header value for `{key}`: {error}"),
+            )
+        })?;
+
+        request = request.header(name, value);
+    }
+
+    Ok(request)
 }
 
 fn classify_reqwest_error(error: reqwest::Error) -> HttpClientError {
@@ -148,8 +185,8 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10))?;
-        let result = client.send("GET", &server.url("/get"), None).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client.send("GET", &server.url("/get"), None, &[]).await?;
 
         assert_eq!(result.status, StatusCode::OK);
         assert!(result.headers.contains_key("content-type"));
@@ -171,9 +208,9 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10))?;
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
         let result = client
-            .send("POST", &server.url("/post"), Some("hello".to_string()))
+            .send("POST", &server.url("/post"), Some("hello".to_string()), &[])
             .await?;
 
         assert_eq!(result.status, StatusCode::CREATED);
@@ -185,11 +222,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_method_returns_error() -> Result<()> {
-        let client = HttpClient::new(Duration::from_secs(10))?;
+    async fn send_put_sends_body_and_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(PUT).path("/put").body("updated");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send("PUT", &server.url("/put"), Some("updated".to_string()), &[])
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(result.body, "ok");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_attaches_custom_headers() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/headers")
+                    .header("authorization", "Bearer token123")
+                    .header("content-type", "application/json");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer token123".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
 
         let result = client
-            .send("PUT", "http://example.test", Some("hello".to_string()))
+            .send("GET", &server.url("/headers"), None, &headers)
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_method_returns_error() -> Result<()> {
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+
+        let result = client
+            .send(
+                "TRACE",
+                "http://example.test",
+                Some("hello".to_string()),
+                &[],
+            )
             .await;
 
         assert!(result.is_err());
@@ -197,6 +292,15 @@ mod tests {
         let error = result.unwrap_err();
 
         assert_eq!(error.kind(), HttpErrorKind::UnsupportedMethod);
+
+        Ok(())
+    }
+
+    #[test]
+    fn new_accepts_insecure_flag() -> Result<()> {
+        let client = HttpClient::new(Duration::from_secs(10), true);
+
+        assert!(client.is_ok());
 
         Ok(())
     }
