@@ -189,9 +189,7 @@ pub fn validate_method(method: &str) -> Result<String> {
 
     match normalized.as_str() {
         "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" => Ok(normalized),
-        _ => bail!(
-            "unsupported HTTP method: {method}. Supported methods: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
-        ),
+        _ => bail!("unsupported method: {normalized}"),
     }
 }
 
@@ -289,8 +287,10 @@ mod tests {
 
     #[test]
     fn validate_method_rejects_unsupported_methods() {
+        let error = validate_method("trace").unwrap_err();
+
+        assert_eq!(error.to_string(), "unsupported method: TRACE");
         assert!(validate_method("").is_err());
-        assert!(validate_method("TRACE").is_err());
         assert!(validate_method("CONNECT").is_err());
     }
 

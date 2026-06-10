@@ -88,16 +88,18 @@ impl HttpClient {
             _ => {
                 return Err(HttpClientError::new(
                     HttpErrorKind::UnsupportedMethod,
-                    format!(
-                        "unsupported HTTP method: {method}. Supported methods: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
-                    ),
+                    format!("unsupported method: {normalized_method}"),
                 ));
             }
         };
 
-        let request = match body {
-            Some(body) => request.body(body),
-            None => request,
+        let request = if normalized_method == "HEAD" {
+            request
+        } else {
+            match body {
+                Some(body) => request.body(body),
+                None => request,
+            }
         };
 
         let request = apply_headers(request, headers)?;
@@ -198,6 +200,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_get_without_body_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("GET").path("/get-no-body");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send("GET", &server.url("/get-no-body"), None, &[])
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(result.body, "ok");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn send_post_sends_body_and_returns_response() -> Result<()> {
         let server = MockServer::start_async().await;
 
@@ -239,6 +264,113 @@ mod tests {
 
         assert_eq!(result.status, StatusCode::OK);
         assert_eq!(result.body, "ok");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_delete_without_body_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("DELETE").path("/delete").body("");
+                then.status(204);
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send("DELETE", &server.url("/delete"), None, &[])
+            .await?;
+
+        assert_eq!(result.status, StatusCode::NO_CONTENT);
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_patch_sends_body_and_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("PATCH").path("/patch").body("patched");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send(
+                "PATCH",
+                &server.url("/patch"),
+                Some("patched".to_string()),
+                &[],
+            )
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(result.body, "ok");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_head_ignores_body() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("HEAD").path("/head");
+                then.status(200);
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send(
+                "HEAD",
+                &server.url("/head"),
+                Some("this-body-must-not-be-sent".to_string()),
+                &[],
+            )
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(result.body, "");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_options_sends_body_and_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("OPTIONS")
+                    .path("/options")
+                    .body("cors-preflight");
+                then.status(204);
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send(
+                "OPTIONS",
+                &server.url("/options"),
+                Some("cors-preflight".to_string()),
+                &[],
+            )
+            .await?;
+
+        assert_eq!(result.status, StatusCode::NO_CONTENT);
         assert_eq!(mock.calls_async().await, 1);
 
         Ok(())
@@ -292,6 +424,7 @@ mod tests {
         let error = result.unwrap_err();
 
         assert_eq!(error.kind(), HttpErrorKind::UnsupportedMethod);
+        assert_eq!(error.to_string(), "unsupported method: TRACE");
 
         Ok(())
     }
