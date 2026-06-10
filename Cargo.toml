@@ -17,3 +17,16 @@ tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 httpmock = "0.8.3"
+
+[profile.test]
+opt-level = 0
+debug = true
+incremental = true
+lto = false
+codegen-units = 256
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
