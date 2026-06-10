@@ -1,12 +1,45 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 pub const DEFAULT_CONFIG_FILE: &str = "clank.yaml";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    Csv,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+impl FromStr for OutputFormat {
+    type Err = String;
+
+    fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "text" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            "csv" => Ok(Self::Csv),
+            _ => Err(format!(
+                "unsupported output format: {input}. Supported formats: text, json, csv"
+            )),
+        }
+    }
+}
+
+pub fn parse_output_format(input: &str) -> Result<OutputFormat> {
+    input.parse().map_err(|error: String| anyhow!(error))
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ClankConfig {
@@ -68,6 +101,10 @@ impl ClankConfig {
 
         for header in &self.headers {
             parse_header(header).with_context(|| format!("invalid config header: {header}"))?;
+        }
+
+        if let Some(output) = &self.output {
+            parse_output_format(output).with_context(|| "invalid config output format")?;
         }
 
         Ok(())
@@ -414,6 +451,54 @@ concurrency: 0
             r#"
 url: http://localhost:3000/api
 timeout_secs: 0
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_format_accepts_supported_values() -> Result<()> {
+        assert_eq!(parse_output_format("text")?, OutputFormat::Text);
+        assert_eq!(parse_output_format("json")?, OutputFormat::Json);
+        assert_eq!(parse_output_format("csv")?, OutputFormat::Csv);
+        assert_eq!(parse_output_format("TEXT")?, OutputFormat::Text);
+        assert_eq!(parse_output_format(" Json ")?, OutputFormat::Json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn output_format_rejects_unsupported_values() {
+        assert!(parse_output_format("").is_err());
+        assert!(parse_output_format("xml").is_err());
+        assert!(parse_output_format("table").is_err());
+    }
+
+    #[test]
+    fn clank_config_accepts_output_format() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+output: json
+"#,
+        )?;
+
+        config.validate()?;
+
+        assert_eq!(config.output, Some("json".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_invalid_output_format() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+output: xml
 "#,
         )?;
 

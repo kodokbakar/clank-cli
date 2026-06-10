@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clank_cli::config::{
-    ClankConfig, DEFAULT_CONFIG_FILE, parse_duration, parse_header, validate_method,
+    ClankConfig, DEFAULT_CONFIG_FILE, OutputFormat, parse_duration, parse_header,
+    parse_output_format, validate_method,
 };
 use clank_cli::engine::{Engine, EngineConfig};
-use clank_cli::stats::format_summary_with_color;
+use clank_cli::stats::format_summary_with_color_and_format;
 use clap::{ArgAction, Parser};
 use console::Term;
 
@@ -50,6 +51,9 @@ struct Cli {
     #[arg(long)]
     timeout_secs: Option<u64>,
 
+    #[arg(short = 'o', long, value_name = "FORMAT", value_parser = parse_output_format_arg)]
+    output: Option<OutputFormat>,
+
     #[arg(short = 'k', long)]
     insecure: bool,
 
@@ -88,6 +92,7 @@ async fn main() -> Result<()> {
     let concurrency = resolve_concurrency(&cli, file_config.as_ref());
     let timeout_secs = resolve_timeout_secs(&cli, file_config.as_ref());
     let insecure = resolve_insecure(&cli, file_config.as_ref());
+    let output_format = resolve_output_format(&cli, file_config.as_ref())?;
 
     if timeout_secs == 0 {
         bail!("timeout_secs must be greater than 0");
@@ -104,7 +109,7 @@ async fn main() -> Result<()> {
     };
 
     let progress_enabled = !cli.quiet;
-    let output_color_enabled = color_enabled(cli.no_color);
+    let output_color_enabled = output_format == OutputFormat::Text && color_enabled(cli.no_color);
     let stats_interval = Duration::from_millis(cli.stats_interval_ms);
 
     let engine = Engine::new_with_progress_color_and_live_stats_interval(
@@ -125,7 +130,7 @@ async fn main() -> Result<()> {
 
     println!(
         "{}",
-        format_summary_with_color(&snapshot, output_color_enabled)
+        format_summary_with_color_and_format(&snapshot, output_format, output_color_enabled)
     );
 
     Ok(())
@@ -205,8 +210,26 @@ fn resolve_insecure(cli: &Cli, config: Option<&ClankConfig>) -> bool {
     }
 }
 
+fn resolve_output_format(cli: &Cli, config: Option<&ClankConfig>) -> Result<OutputFormat> {
+    if let Some(output) = cli.output {
+        return Ok(output);
+    }
+
+    if let Some(config) = config {
+        if let Some(output) = &config.output {
+            return parse_output_format(output);
+        }
+    }
+
+    Ok(OutputFormat::Text)
+}
+
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
+}
+
+fn parse_output_format_arg(value: &str) -> Result<OutputFormat, String> {
+    parse_output_format(value).map_err(|error| error.to_string())
 }
 
 fn parse_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
@@ -234,6 +257,7 @@ mod tests {
             requests: None,
             duration: None,
             timeout_secs: None,
+            output: None,
             insecure: false,
             quiet: false,
             stats_interval_ms: 1_000,
@@ -250,8 +274,46 @@ mod tests {
             timeout_secs: 30,
             headers: vec!["Authorization: Bearer config".to_string()],
             insecure: true,
-            output: None,
+            output: Some("json".to_string()),
         }
+    }
+
+    #[test]
+    fn resolve_output_format_prefers_cli_over_config() -> Result<()> {
+        let mut cli = cli();
+        cli.output = Some(OutputFormat::Csv);
+
+        assert_eq!(
+            resolve_output_format(&cli, Some(&config()))?,
+            OutputFormat::Csv
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_output_format_uses_config_when_cli_missing() -> Result<()> {
+        assert_eq!(
+            resolve_output_format(&cli(), Some(&config()))?,
+            OutputFormat::Json
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_output_format_uses_text_default() -> Result<()> {
+        assert_eq!(resolve_output_format(&cli(), None)?, OutputFormat::Text);
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_output_format_rejects_invalid_config_value() {
+        let mut config = config();
+        config.output = Some("xml".to_string());
+
+        assert!(resolve_output_format(&cli(), Some(&config)).is_err());
     }
 
     #[test]

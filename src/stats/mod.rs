@@ -3,6 +3,9 @@ pub mod histogram;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
+use crate::config::OutputFormat;
 use crate::ui::{
     LiveStats, count_error_color, count_warning_color, error_rate_color, latency_color,
     maybe_color, success_rate_color, throughput_color,
@@ -128,6 +131,37 @@ pub struct StatsSnapshot {
     pub throughput: Throughput,
     pub latencies: Vec<Duration>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SummaryJson {
+    total_requests: u64,
+    successful: u64,
+    errors: u64,
+    error_rate: f64,
+    latency: LatencyJson,
+    throughput_rps: f64,
+    duration_secs: f64,
+    error_breakdown: ErrorBreakdownJson,
+}
+
+#[derive(Debug, Serialize)]
+struct LatencyJson {
+    avg_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    p999_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBreakdownJson {
+    timeout: u64,
+    connection: u64,
+    http_4xx: u64,
+    http_5xx: u64,
+    http_other: u64,
+    other: u64,
 }
 
 impl Default for StatsCollector {
@@ -268,11 +302,31 @@ impl StatsCollector {
     }
 }
 
-pub fn format_summary(snapshot: &StatsSnapshot) -> String {
-    format_summary_with_color(snapshot, false)
+pub fn format_summary(snapshot: &StatsSnapshot, output_format: OutputFormat) -> String {
+    format_summary_with_color_and_format(snapshot, output_format, false)
+}
+
+pub fn format_summary_text(snapshot: &StatsSnapshot) -> String {
+    format_summary_text_with_color(snapshot, false)
 }
 
 pub fn format_summary_with_color(snapshot: &StatsSnapshot, color_enabled: bool) -> String {
+    format_summary_text_with_color(snapshot, color_enabled)
+}
+
+pub fn format_summary_with_color_and_format(
+    snapshot: &StatsSnapshot,
+    output_format: OutputFormat,
+    color_enabled: bool,
+) -> String {
+    match output_format {
+        OutputFormat::Text => format_summary_text_with_color(snapshot, color_enabled),
+        OutputFormat::Json => format_summary_json(snapshot),
+        OutputFormat::Csv => format_summary_csv(snapshot),
+    }
+}
+
+fn format_summary_text_with_color(snapshot: &StatsSnapshot, color_enabled: bool) -> String {
     let total_requests = snapshot.total_requests;
     let successful = snapshot.successful_requests;
     let errors = snapshot.total_errors;
@@ -378,6 +432,61 @@ Duration:          {duration_secs:.2}s
     )
 }
 
+pub fn format_summary_json(snapshot: &StatsSnapshot) -> String {
+    let summary = SummaryJson {
+        total_requests: snapshot.total_requests,
+        successful: snapshot.successful_requests,
+        errors: snapshot.total_errors,
+        error_rate: percentage(snapshot.total_errors, snapshot.total_requests),
+        latency: LatencyJson {
+            avg_ms: average_latency_ms(snapshot),
+            p50_ms: duration_to_ms(snapshot.percentiles.p50),
+            p95_ms: duration_to_ms(snapshot.percentiles.p95),
+            p99_ms: duration_to_ms(snapshot.percentiles.p99),
+            p999_ms: duration_to_ms(snapshot.percentiles.p999),
+        },
+        throughput_rps: snapshot.throughput.requests_per_second,
+        duration_secs: snapshot.duration.as_secs_f64(),
+        error_breakdown: ErrorBreakdownJson {
+            timeout: snapshot.error_counts.timeout,
+            connection: snapshot.error_counts.connection,
+            http_4xx: snapshot.error_counts.http_4xx,
+            http_5xx: snapshot.error_counts.http_5xx,
+            http_other: snapshot.error_counts.http_other,
+            other: snapshot.error_counts.other,
+        },
+    };
+
+    serde_json::to_string_pretty(&summary).expect("summary JSON serialization should not fail")
+}
+
+pub fn format_summary_csv(snapshot: &StatsSnapshot) -> String {
+    let header = "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other";
+
+    let row = format!(
+        "{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.2},{},{},{},{},{},{}",
+        snapshot.total_requests,
+        snapshot.successful_requests,
+        snapshot.total_errors,
+        percentage(snapshot.total_errors, snapshot.total_requests),
+        average_latency_ms(snapshot),
+        duration_to_ms(snapshot.percentiles.p50),
+        duration_to_ms(snapshot.percentiles.p95),
+        duration_to_ms(snapshot.percentiles.p99),
+        duration_to_ms(snapshot.percentiles.p999),
+        snapshot.throughput.requests_per_second,
+        snapshot.duration.as_secs_f64(),
+        snapshot.error_counts.timeout,
+        snapshot.error_counts.connection,
+        snapshot.error_counts.http_4xx,
+        snapshot.error_counts.http_5xx,
+        snapshot.error_counts.http_other,
+        snapshot.error_counts.other,
+    );
+
+    format!("{header}\n{row}")
+}
+
 fn percentage(value: u64, total: u64) -> f64 {
     if total == 0 {
         0.0
@@ -424,6 +533,85 @@ mod tests {
             diff < 0.0001,
             "actual: {actual}, expected: {expected}, diff: {diff}"
         );
+    }
+
+    fn summary_snapshot() -> StatsSnapshot {
+        let mut stats = StatsCollector::new();
+
+        for _ in 0..80 {
+            stats.record(Duration::from_millis(40), 200);
+        }
+
+        for _ in 0..10 {
+            stats.record(Duration::from_millis(80), 404);
+        }
+
+        for _ in 0..10 {
+            stats.record_error(ErrorCategory::Timeout, "request timed out");
+        }
+
+        stats.snapshot()
+    }
+
+    #[test]
+    fn format_summary_dispatches_text_output() {
+        let snapshot = summary_snapshot();
+        let output = format_summary(&snapshot, OutputFormat::Text);
+
+        assert!(output.contains("Results:"));
+        assert!(output.contains("Total Requests:"));
+        assert!(output.contains("Throughput:"));
+    }
+
+    #[test]
+    fn format_summary_json_outputs_valid_json() -> serde_json::Result<()> {
+        let snapshot = summary_snapshot();
+        let output = format_summary_json(&snapshot);
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+
+        assert_eq!(value["total_requests"], 100);
+        assert_eq!(value["successful"], 80);
+        assert_eq!(value["errors"], 20);
+        assert_eq!(value["error_breakdown"]["timeout"], 10);
+        assert!(value["latency"]["p99_ms"].is_number());
+        assert!(value["throughput_rps"].is_number());
+        assert!(value["duration_secs"].is_number());
+
+        Ok(())
+    }
+
+    #[test]
+    fn format_summary_dispatches_json_output() -> serde_json::Result<()> {
+        let snapshot = summary_snapshot();
+        let output = format_summary(&snapshot, OutputFormat::Json);
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+
+        assert_eq!(value["total_requests"], 100);
+
+        Ok(())
+    }
+
+    #[test]
+    fn format_summary_csv_outputs_header_and_one_row() {
+        let snapshot = summary_snapshot();
+        let output = format_summary_csv(&snapshot);
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
+        );
+        assert!(lines[1].starts_with("100,80,20,20.0,"));
+    }
+
+    #[test]
+    fn format_summary_dispatches_csv_output() {
+        let snapshot = summary_snapshot();
+        let output = format_summary(&snapshot, OutputFormat::Csv);
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
@@ -507,7 +695,7 @@ mod tests {
             errors: Vec::new(),
         };
 
-        let output = format_summary(&snapshot);
+        let output = format_summary_text(&snapshot);
 
         assert!(output.contains("Throughput:        10.0 req/s"));
     }
@@ -612,7 +800,7 @@ mod tests {
     fn format_summary_handles_zero_requests() {
         let stats = StatsCollector::new();
         let snapshot = stats.snapshot();
-        let output = format_summary(&snapshot);
+        let output = format_summary_text(&snapshot);
 
         assert!(output.contains("Total Requests:    0"));
         assert!(output.contains("Successful:        0 (0.0%)"));
@@ -636,7 +824,7 @@ mod tests {
             stats.record(Duration::from_millis(50), 503);
         }
 
-        let output = format_summary(&stats.snapshot());
+        let output = format_summary_text(&stats.snapshot());
 
         assert!(output.contains("Total Requests:    1,234"));
         assert!(output.contains("Successful:        1,200 (97.2%)"));
@@ -781,7 +969,7 @@ mod tests {
         let snapshot = stats.snapshot();
 
         assert_eq!(
-            format_summary(&snapshot),
+            format_summary_text(&snapshot),
             format_summary_with_color(&snapshot, false)
         );
     }
