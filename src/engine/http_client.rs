@@ -247,12 +247,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_put_sends_body_and_returns_response() -> Result<()> {
+    async fn send_put_with_body_returns_response() -> Result<()> {
         let server = MockServer::start_async().await;
 
         let mock = server
             .mock_async(|when, then| {
-                when.method(PUT).path("/put").body("updated");
+                when.method("PUT").path("/put").body("updated");
                 then.status(200).body("ok");
             })
             .await;
@@ -260,6 +260,29 @@ mod tests {
         let client = HttpClient::new(Duration::from_secs(10), false)?;
         let result = client
             .send("PUT", &server.url("/put"), Some("updated".to_string()), &[])
+            .await?;
+
+        assert_eq!(result.status, StatusCode::OK);
+        assert_eq!(result.body, "ok");
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_put_without_body_returns_response() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method("PUT").path("/put-no-body").body("");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let result = client
+            .send("PUT", &server.url("/put-no-body"), None, &[])
             .await?;
 
         assert_eq!(result.status, StatusCode::OK);

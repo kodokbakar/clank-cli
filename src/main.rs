@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clank_cli::config::{
     ClankConfig, DEFAULT_CONFIG_FILE, OutputFormat, parse_duration, parse_header,
     parse_output_format, validate_method,
@@ -35,6 +36,12 @@ struct Cli {
 
     #[arg(long)]
     body: Option<String>,
+
+    #[arg(short = 'B', long = "body-file", value_name = "FILE")]
+    body_file: Option<PathBuf>,
+
+    #[arg(short = 'T', long = "content-type", value_name = "CONTENT_TYPE")]
+    content_type: Option<String>,
 
     #[arg(short = 'H', long = "header", value_name = "KEY: VALUE", action = ArgAction::Append)]
     headers: Vec<String>,
@@ -87,7 +94,7 @@ async fn main() -> Result<()> {
 
     let url = resolve_url(&cli, file_config.as_ref())?;
     let method = resolve_method(&cli, file_config.as_ref())?;
-    let body = resolve_body(&cli, file_config.as_ref());
+    let body = resolve_body(&cli, file_config.as_ref())?;
     let headers = resolve_headers(&cli, file_config.as_ref())?;
     let concurrency = resolve_concurrency(&cli, file_config.as_ref());
     let timeout_secs = resolve_timeout_secs(&cli, file_config.as_ref());
@@ -97,6 +104,8 @@ async fn main() -> Result<()> {
     if timeout_secs == 0 {
         bail!("timeout_secs must be greater than 0");
     }
+
+    warn_if_body_is_missing(&method, body.as_ref());
 
     let config = EngineConfig {
         url,
@@ -172,22 +181,97 @@ fn resolve_method(cli: &Cli, config: Option<&ClankConfig>) -> Result<String> {
     validate_method(method)
 }
 
-fn resolve_body(cli: &Cli, config: Option<&ClankConfig>) -> Option<String> {
-    cli.body
-        .clone()
-        .or_else(|| config.and_then(|config| config.body.clone()))
-}
+fn resolve_body(cli: &Cli, config: Option<&ClankConfig>) -> Result<Option<String>> {
+    if cli.body.is_some() && cli.body_file.is_some() {
+        bail!("use either --body or --body-file, not both");
+    }
 
-fn resolve_headers(cli: &Cli, config: Option<&ClankConfig>) -> Result<Vec<(String, String)>> {
-    if !cli.headers.is_empty() {
-        return parse_headers(&cli.headers);
+    if let Some(body) = &cli.body {
+        return Ok(Some(body.clone()));
+    }
+
+    if let Some(body_file) = &cli.body_file {
+        return read_body_file(body_file).map(Some);
     }
 
     if let Some(config) = config {
-        return parse_headers(&config.headers);
+        if let Some(body_file) = &config.body_file {
+            return read_body_file(body_file).map(Some);
+        }
+
+        if let Some(body) = &config.body {
+            return Ok(Some(body.clone()));
+        }
     }
 
-    Ok(Vec::new())
+    Ok(None)
+}
+
+fn resolve_headers(cli: &Cli, config: Option<&ClankConfig>) -> Result<Vec<(String, String)>> {
+    let mut headers = if !cli.headers.is_empty() {
+        parse_headers(&cli.headers)?
+    } else if let Some(config) = config {
+        parse_headers(&config.headers)?
+    } else {
+        Vec::new()
+    };
+
+    if let Some(content_type) = resolve_content_type(cli, config) {
+        apply_content_type_header(&mut headers, content_type)?;
+    }
+
+    Ok(headers)
+}
+
+fn resolve_content_type<'a>(cli: &'a Cli, config: Option<&'a ClankConfig>) -> Option<&'a str> {
+    if let Some(content_type) = &cli.content_type {
+        return Some(content_type.as_str());
+    }
+
+    if !cli.headers.is_empty() {
+        return None;
+    }
+
+    config.and_then(|config| config.content_type.as_deref())
+}
+
+fn apply_content_type_header(
+    headers: &mut Vec<(String, String)>,
+    content_type: &str,
+) -> Result<()> {
+    let content_type = content_type.trim();
+
+    if content_type.is_empty() {
+        bail!("content type cannot be empty");
+    }
+
+    headers.retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
+    headers.push(("Content-Type".to_string(), content_type.to_string()));
+
+    Ok(())
+}
+
+fn read_body_file(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read body file: {}", path.display()))?;
+
+    String::from_utf8(bytes)
+        .with_context(|| format!("body file is not valid UTF-8: {}", path.display()))
+}
+
+fn warn_if_body_is_missing(method: &str, body: Option<&String>) {
+    if body.is_some() {
+        return;
+    }
+
+    match method {
+        "POST" | "PUT" | "PATCH" => {
+            eprintln!("Warning: {method} request has no body");
+        }
+        _ => {}
+    }
 }
 
 fn resolve_concurrency(cli: &Cli, config: Option<&ClankConfig>) -> usize {
@@ -252,6 +336,8 @@ mod tests {
             no_config: false,
             method: None,
             body: None,
+            body_file: None,
+            content_type: None,
             headers: Vec::new(),
             concurrency: None,
             requests: None,
@@ -270,6 +356,8 @@ mod tests {
             url: "http://config.test".to_string(),
             method: "POST".to_string(),
             body: Some("from-config".to_string()),
+            body_file: None,
+            content_type: Some("application/json".to_string()),
             concurrency: 20,
             timeout_secs: 30,
             headers: vec!["Authorization: Bearer config".to_string()],
@@ -377,14 +465,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_body_prefers_cli_over_config() {
+    fn resolve_body_prefers_cli_over_config() -> Result<()> {
         let mut cli = cli();
         cli.body = Some("from-cli".to_string());
 
         assert_eq!(
-            resolve_body(&cli, Some(&config())),
+            resolve_body(&cli, Some(&config()))?,
             Some("from-cli".to_string())
         );
+
+        Ok(())
     }
 
     #[test]
@@ -408,7 +498,10 @@ mod tests {
 
         assert_eq!(
             headers,
-            vec![("Authorization".to_string(), "Bearer config".to_string())]
+            vec![
+                ("Authorization".to_string(), "Bearer config".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]
         );
 
         Ok(())
@@ -463,5 +556,154 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    fn unique_body_file_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after UNIX epoch")
+            .as_nanos();
+
+        std::env::temp_dir().join(format!("clank-cli-{name}-{nanos}.json"))
+    }
+
+    #[test]
+    fn resolve_body_uses_body_file_when_cli_body_missing() -> Result<()> {
+        let path = unique_body_file_path("body-file");
+        fs::write(&path, r#"{"name":"file"}"#)?;
+
+        let mut cli = cli();
+        cli.body_file = Some(path.clone());
+
+        assert_eq!(
+            resolve_body(&cli, Some(&config()))?,
+            Some(r#"{"name":"file"}"#.to_string())
+        );
+
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_body_rejects_missing_body_file() {
+        let mut cli = cli();
+        cli.body_file = Some(PathBuf::from("missing-body-file.json"));
+
+        let error = resolve_body(&cli, None).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read body file: missing-body-file.json")
+        );
+    }
+
+    #[test]
+    fn resolve_body_rejects_non_utf8_body_file() -> Result<()> {
+        let path = unique_body_file_path("non-utf8-body-file");
+
+        fs::write(&path, [0xff, 0xfe, 0xfd])?;
+
+        let mut cli = cli();
+        cli.body_file = Some(path.clone());
+
+        let error = resolve_body(&cli, None).unwrap_err();
+
+        assert!(error.to_string().contains("body file is not valid UTF-8"));
+
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_body_rejects_body_and_body_file_together() -> Result<()> {
+        let mut cli = cli();
+        cli.body = Some("raw-body".to_string());
+        cli.body_file = Some(PathBuf::from("request.json"));
+
+        let error = resolve_body(&cli, None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "use either --body or --body-file, not both"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_body_uses_config_body_file_when_present() -> Result<()> {
+        let path = unique_body_file_path("config-body-file");
+        fs::write(&path, r#"{"name":"config-file"}"#)?;
+
+        let cli = cli();
+        let mut config = config();
+        config.body = None;
+        config.body_file = Some(path.clone());
+
+        assert_eq!(
+            resolve_body(&cli, Some(&config))?,
+            Some(r#"{"name":"config-file"}"#.to_string())
+        );
+
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_headers_applies_cli_content_type() -> Result<()> {
+        let mut cli = cli();
+        cli.content_type = Some("application/json".to_string());
+
+        let headers = resolve_headers(&cli, None)?;
+
+        assert_eq!(
+            headers,
+            vec![("Content-Type".to_string(), "application/json".to_string())]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_headers_content_type_overrides_duplicate_header() -> Result<()> {
+        let mut cli = cli();
+        cli.headers = vec!["Content-Type: text/plain".to_string()];
+        cli.content_type = Some("application/json".to_string());
+
+        let headers = resolve_headers(&cli, None)?;
+
+        assert_eq!(
+            headers,
+            vec![("Content-Type".to_string(), "application/json".to_string())]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_headers_preserves_explicit_content_type_header_without_flag() -> Result<()> {
+        let mut cli = cli();
+        cli.headers = vec!["Content-Type: text/plain".to_string()];
+
+        let headers = resolve_headers(&cli, Some(&config()))?;
+
+        assert_eq!(
+            headers,
+            vec![("Content-Type".to_string(), "text/plain".to_string())]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_headers_rejects_empty_content_type() {
+        let mut cli = cli();
+        cli.content_type = Some(" ".to_string());
+
+        assert!(resolve_headers(&cli, None).is_err());
     }
 }

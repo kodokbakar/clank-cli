@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -47,6 +47,10 @@ pub struct ClankConfig {
     #[serde(default = "default_method")]
     pub method: String,
     pub body: Option<String>,
+    #[serde(default)]
+    pub body_file: Option<PathBuf>,
+    #[serde(default)]
+    pub content_type: Option<String>,
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
     #[serde(default = "default_timeout")]
@@ -90,6 +94,22 @@ impl ClankConfig {
         }
 
         validate_method(&self.method).with_context(|| "invalid config method")?;
+
+        if self.body.is_some() && self.body_file.is_some() {
+            bail!("config body and body_file cannot be used together");
+        }
+
+        if let Some(body_file) = &self.body_file
+            && body_file.as_os_str().is_empty()
+        {
+            bail!("config body_file cannot be empty");
+        }
+
+        if let Some(content_type) = &self.content_type
+            && content_type.trim().is_empty()
+        {
+            bail!("config content_type cannot be empty");
+        }
 
         if self.concurrency == 0 {
             bail!("config concurrency must be greater than 0");
@@ -331,11 +351,12 @@ mod tests {
 url: http://localhost:3000/api
 method: POST
 body: '{"name":"test"}'
+content_type: application/json
 concurrency: 20
 timeout_secs: 30
 headers:
   - "Authorization: Bearer token123"
-  - "Content-Type: application/json"
+  - "Content-Type: text/plain"
 insecure: true
 "#,
         )?;
@@ -345,6 +366,8 @@ insecure: true
         assert_eq!(config.url, "http://localhost:3000/api");
         assert_eq!(config.method, "POST");
         assert_eq!(config.body, Some(r#"{"name":"test"}"#.to_string()));
+        assert_eq!(config.content_type, Some("application/json".to_string()));
+        assert_eq!(config.body_file, None);
         assert_eq!(config.concurrency, 20);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.headers.len(), 2);
@@ -367,6 +390,8 @@ url: http://localhost:3000/api
 
         assert_eq!(config.method, "GET");
         assert_eq!(config.body, None);
+        assert_eq!(config.body_file, None);
+        assert_eq!(config.content_type, None);
         assert_eq!(config.concurrency, 10);
         assert_eq!(config.timeout_secs, 10);
         assert!(config.headers.is_empty());
@@ -499,6 +524,56 @@ output: json
             r#"
 url: http://localhost:3000/api
 output: xml
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_accepts_body_file_and_content_type() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+method: POST
+body_file: ./request_body.json
+content_type: application/json
+"#,
+        )?;
+
+        config.validate()?;
+
+        assert_eq!(config.body, None);
+        assert_eq!(config.body_file, Some(PathBuf::from("./request_body.json")));
+        assert_eq!(config.content_type, Some("application/json".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_body_and_body_file_together() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+method: POST
+body: '{"name":"test"}'
+body_file: ./request_body.json
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_empty_content_type() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+content_type: " "
 "#,
         )?;
 
