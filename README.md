@@ -1,5 +1,7 @@
 # clank-cli
 
+[![CI](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml/badge.svg)](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml)
+
 HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 
 ## Features
