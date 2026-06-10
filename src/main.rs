@@ -228,11 +228,18 @@ fn resolve_content_type<'a>(cli: &'a Cli, config: Option<&'a ClankConfig>) -> Op
         return Some(content_type.as_str());
     }
 
-    if !cli.headers.is_empty() {
+    if headers_contain_key(&cli.headers, "content-type") {
         return None;
     }
 
     config.and_then(|config| config.content_type.as_deref())
+}
+
+fn headers_contain_key(headers: &[String], expected_key: &str) -> bool {
+    headers.iter().any(|header| match header.split_once(':') {
+        Some((key, _)) => key.trim().eq_ignore_ascii_case(expected_key),
+        None => false,
+    })
 }
 
 fn apply_content_type_header(
@@ -478,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_headers_prefers_cli_over_config() -> Result<()> {
+    fn resolve_headers_prefers_cli_headers_but_keeps_config_content_type() -> Result<()> {
         let mut cli = cli();
         cli.headers = vec!["Authorization: Bearer cli".to_string()];
 
@@ -486,7 +493,10 @@ mod tests {
 
         assert_eq!(
             headers,
-            vec![("Authorization".to_string(), "Bearer cli".to_string())]
+            vec![
+                ("Authorization".to_string(), "Bearer cli".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]
         );
 
         Ok(())
@@ -537,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_headers_cli_replaces_config_headers() -> Result<()> {
+    fn resolve_headers_cli_replaces_config_headers_but_keeps_config_content_type() -> Result<()> {
         let mut cli = cli();
 
         cli.headers = vec![
@@ -552,6 +562,7 @@ mod tests {
             vec![
                 ("Authorization".to_string(), "Bearer cli".to_string()),
                 ("X-Source".to_string(), "cli".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
             ]
         );
 
@@ -694,6 +705,24 @@ mod tests {
         assert_eq!(
             headers,
             vec![("Content-Type".to_string(), "text/plain".to_string())]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_headers_cli_non_content_type_header_keeps_config_content_type() -> Result<()> {
+        let mut cli = cli();
+        cli.headers = vec!["Accept: application/json".to_string()];
+
+        let headers = resolve_headers(&cli, Some(&config()))?;
+
+        assert_eq!(
+            headers,
+            vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]
         );
 
         Ok(())
