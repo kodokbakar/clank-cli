@@ -429,13 +429,12 @@ async fn join_worker_handles(handles: Vec<JoinHandle<()>>, context: &'static str
     let mut task_error = None;
 
     for handle in handles {
-        if let Err(error) = handle.await.context(context) {
-            if task_error.is_none() {
-                task_error = Some(error);
-            }
+        if let Err(error) = handle.await.context(context)
+            && task_error.is_none()
+        {
+            task_error = Some(error);
         }
     }
-
     if let Some(error) = task_error {
         return Err(error);
     }

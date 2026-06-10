@@ -306,10 +306,10 @@ fn resolve_output_format(cli: &Cli, config: Option<&ClankConfig>) -> Result<Outp
         return Ok(output);
     }
 
-    if let Some(config) = config {
-        if let Some(output) = &config.output {
-            return parse_output_format(output);
-        }
+    if let Some(config) = config
+        && let Some(output) = &config.output
+    {
+        return parse_output_format(output);
     }
 
     Ok(OutputFormat::Text)

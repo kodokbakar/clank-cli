@@ -9,17 +9,12 @@ use serde::Deserialize;
 
 pub const DEFAULT_CONFIG_FILE: &str = "clank.yaml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
+    #[default]
     Text,
     Json,
     Csv,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 impl FromStr for OutputFormat {
