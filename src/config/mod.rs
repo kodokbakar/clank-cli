@@ -1,6 +1,87 @@
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+pub const DEFAULT_CONFIG_FILE: &str = "clank.yaml";
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ClankConfig {
+    pub url: String,
+    #[serde(default = "default_method")]
+    pub method: String,
+    pub body: Option<String>,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub insecure: bool,
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+impl ClankConfig {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file: {}", path.display()))?;
+
+        Self::from_yaml_str(path, &contents)
+    }
+
+    pub fn optional_from_file(path: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = path.as_ref();
+
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read config file: {}", path.display()));
+            }
+        };
+
+        Self::from_yaml_str(path, &contents).map(Some)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.url.trim().is_empty() {
+            bail!("config url cannot be empty");
+        }
+
+        validate_method(&self.method).with_context(|| "invalid config method")?;
+
+        if self.concurrency == 0 {
+            bail!("config concurrency must be greater than 0");
+        }
+
+        if self.timeout_secs == 0 {
+            bail!("config timeout_secs must be greater than 0");
+        }
+
+        for header in &self.headers {
+            parse_header(header).with_context(|| format!("invalid config header: {header}"))?;
+        }
+
+        Ok(())
+    }
+
+    fn from_yaml_str(path: &Path, contents: &str) -> Result<Self> {
+        let config: Self = serde_yaml::from_str(contents)
+            .with_context(|| format!("failed to parse YAML config file: {}", path.display()))?;
+
+        config.validate()?;
+
+        Ok(config)
+    }
+}
 
 pub fn parse_duration(input: &str) -> Result<Duration> {
     let input = input.trim();
@@ -92,9 +173,30 @@ pub fn parse_header(input: &str) -> Result<(String, String)> {
     Ok((key.to_string(), value.to_string()))
 }
 
+fn default_method() -> String {
+    "GET".to_string()
+}
+
+fn default_concurrency() -> usize {
+    10
+}
+
+fn default_timeout() -> u64 {
+    10
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_config_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after UNIX epoch")
+            .as_nanos();
+
+        std::env::temp_dir().join(format!("clank-cli-{name}-{nanos}.yaml"))
+    }
 
     #[test]
     fn parse_duration_supports_seconds() -> Result<()> {
@@ -180,5 +282,143 @@ mod tests {
         assert!(parse_header("").is_err());
         assert!(parse_header("Authorization").is_err());
         assert!(parse_header(": value").is_err());
+    }
+
+    #[test]
+    fn clank_config_parses_yaml_file() -> Result<()> {
+        let path = unique_config_path("valid");
+
+        fs::write(
+            &path,
+            r#"
+url: http://localhost:3000/api
+method: POST
+body: '{"name":"test"}'
+concurrency: 20
+timeout_secs: 30
+headers:
+  - "Authorization: Bearer token123"
+  - "Content-Type: application/json"
+insecure: true
+"#,
+        )?;
+
+        let config = ClankConfig::from_file(&path)?;
+
+        assert_eq!(config.url, "http://localhost:3000/api");
+        assert_eq!(config.method, "POST");
+        assert_eq!(config.body, Some(r#"{"name":"test"}"#.to_string()));
+        assert_eq!(config.concurrency, 20);
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.headers.len(), 2);
+        assert!(config.insecure);
+
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_uses_defaults() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+"#,
+        )?;
+
+        config.validate()?;
+
+        assert_eq!(config.method, "GET");
+        assert_eq!(config.body, None);
+        assert_eq!(config.concurrency, 10);
+        assert_eq!(config.timeout_secs, 10);
+        assert!(config.headers.is_empty());
+        assert!(!config.insecure);
+        assert_eq!(config.output, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn optional_from_file_returns_none_when_file_is_missing() -> Result<()> {
+        let path = unique_config_path("missing");
+
+        let config = ClankConfig::optional_from_file(path)?;
+
+        assert_eq!(config, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_corrupt_yaml() -> Result<()> {
+        let path = unique_config_path("corrupt");
+
+        fs::write(&path, "url: [")?;
+
+        let result = ClankConfig::optional_from_file(&path);
+
+        assert!(result.is_err());
+
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_invalid_method() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+method: TRACE
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_invalid_header() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+headers:
+  - "Authorization"
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_zero_concurrency() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+concurrency: 0
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_zero_timeout_secs() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+timeout_secs: 0
+"#,
+        )?;
+
+        assert!(config.validate().is_err());
+
+        Ok(())
     }
 }

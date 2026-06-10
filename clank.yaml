@@ -1,0 +1,9 @@
+url: http://localhost:3000/api
+method: POST
+body: '{"name":"test"}'
+concurrency: 20
+timeout_secs: 30
+headers:
+  - "Authorization: Bearer token123"
+  - "Content-Type: application/json"
+insecure: false
