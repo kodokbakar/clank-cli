@@ -29,7 +29,7 @@ cargo install clank-cli
 
 Download pre-built binaries from [GitHub Releases](https://github.com/kodokbakar/clank-cli/releases).
 
-### Homebrew (coming soon)
+### Homebrew
 
 ```bash
 brew install kodokbakar/tap/clank-cli
