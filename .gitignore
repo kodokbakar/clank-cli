@@ -1,3 +1,18 @@
-/target
+# Rust build artifacts
+/target/
 
-dist/
+# Release/package artifacts
+/dist/
+
+# Local environment files
+.env
+.env.*
+
+# Logs
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

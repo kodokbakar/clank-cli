@@ -22,7 +22,7 @@ echo "Running tests with dev profile..."
 cargo test --target "$TARGET"
 
 echo "Running clippy with dev profile..."
-cargo clippy --target "$TARGET" --all-targets
+cargo clippy --target "$TARGET" --all-targets -- -D warnings
 
 echo "Building release binary..."
 ./scripts/build.sh "$TARGET"
