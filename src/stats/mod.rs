@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config::OutputFormat;
+use crate::config::RateLimitConfig;
 use crate::ui::{
     LiveStats, count_error_color, count_warning_color, error_rate_color, latency_color,
     maybe_color, success_rate_color, throughput_color,
@@ -141,6 +142,7 @@ struct SummaryJson {
     error_rate: f64,
     latency: LatencyJson,
     throughput_rps: f64,
+    rate_limit: String,
     duration_secs: f64,
     error_breakdown: ErrorBreakdownJson,
 }
@@ -319,14 +321,38 @@ pub fn format_summary_with_color_and_format(
     output_format: OutputFormat,
     color_enabled: bool,
 ) -> String {
+    format_summary_with_rate_limit_and_color_and_format(
+        snapshot,
+        output_format,
+        color_enabled,
+        None,
+    )
+}
+
+pub fn format_summary_with_rate_limit_and_color_and_format(
+    snapshot: &StatsSnapshot,
+    output_format: OutputFormat,
+    color_enabled: bool,
+    rate_limit: Option<&RateLimitConfig>,
+) -> String {
     match output_format {
-        OutputFormat::Text => format_summary_text_with_color(snapshot, color_enabled),
-        OutputFormat::Json => format_summary_json(snapshot),
-        OutputFormat::Csv => format_summary_csv(snapshot),
+        OutputFormat::Text => {
+            format_summary_text_with_rate_limit_and_color(snapshot, color_enabled, rate_limit)
+        }
+        OutputFormat::Json => format_summary_json_with_rate_limit(snapshot, rate_limit),
+        OutputFormat::Csv => format_summary_csv_with_rate_limit(snapshot, rate_limit),
     }
 }
 
 fn format_summary_text_with_color(snapshot: &StatsSnapshot, color_enabled: bool) -> String {
+    format_summary_text_with_rate_limit_and_color(snapshot, color_enabled, None)
+}
+
+fn format_summary_text_with_rate_limit_and_color(
+    snapshot: &StatsSnapshot,
+    color_enabled: bool,
+    rate_limit: Option<&RateLimitConfig>,
+) -> String {
     let total_requests = snapshot.total_requests;
     let successful = snapshot.successful_requests;
     let errors = snapshot.total_errors;
@@ -340,6 +366,7 @@ fn format_summary_text_with_color(snapshot: &StatsSnapshot, color_enabled: bool)
     let p999_ms = duration_to_ms(snapshot.percentiles.p999);
     let duration_secs = snapshot.duration.as_secs_f64();
     let throughput = snapshot.throughput.requests_per_second;
+    let rate_limit_line = rate_limit_label(rate_limit);
 
     let total_requests_line = format_number(total_requests);
 
@@ -427,12 +454,21 @@ Latency (p95):     {p95_ms:.1}ms
 Latency (p99):     {p99_line}
 Latency (p999):    {p999_ms:.1}ms
 Throughput:        {throughput_line}
+Rate Limit:        {rate_limit_line}
 Duration:          {duration_secs:.2}s
 ────────────────────────────────"
     )
 }
 
-pub fn format_summary_json(snapshot: &StatsSnapshot) -> String {
+#[cfg(test)]
+fn format_summary_json(snapshot: &StatsSnapshot) -> String {
+    format_summary_json_with_rate_limit(snapshot, None)
+}
+
+fn format_summary_json_with_rate_limit(
+    snapshot: &StatsSnapshot,
+    rate_limit: Option<&RateLimitConfig>,
+) -> String {
     let summary = SummaryJson {
         total_requests: snapshot.total_requests,
         successful: snapshot.successful_requests,
@@ -446,6 +482,7 @@ pub fn format_summary_json(snapshot: &StatsSnapshot) -> String {
             p999_ms: duration_to_ms(snapshot.percentiles.p999),
         },
         throughput_rps: snapshot.throughput.requests_per_second,
+        rate_limit: rate_limit_label(rate_limit),
         duration_secs: snapshot.duration.as_secs_f64(),
         error_breakdown: ErrorBreakdownJson {
             timeout: snapshot.error_counts.timeout,
@@ -460,11 +497,17 @@ pub fn format_summary_json(snapshot: &StatsSnapshot) -> String {
     serde_json::to_string_pretty(&summary).expect("summary JSON serialization should not fail")
 }
 
-pub fn format_summary_csv(snapshot: &StatsSnapshot) -> String {
-    let header = "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other";
+#[cfg(test)]
+fn format_summary_csv(snapshot: &StatsSnapshot) -> String {
+    format_summary_csv_with_rate_limit(snapshot, None)
+}
 
-    let row = format!(
-        "{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.2},{},{},{},{},{},{}",
+fn format_summary_csv_with_rate_limit(
+    snapshot: &StatsSnapshot,
+    rate_limit: Option<&RateLimitConfig>,
+) -> String {
+    format!(
+        "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other\n{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.2},{},{},{},{},{},{}",
         snapshot.total_requests,
         snapshot.successful_requests,
         snapshot.total_errors,
@@ -475,6 +518,7 @@ pub fn format_summary_csv(snapshot: &StatsSnapshot) -> String {
         duration_to_ms(snapshot.percentiles.p99),
         duration_to_ms(snapshot.percentiles.p999),
         snapshot.throughput.requests_per_second,
+        rate_limit_label(rate_limit),
         snapshot.duration.as_secs_f64(),
         snapshot.error_counts.timeout,
         snapshot.error_counts.connection,
@@ -482,9 +526,13 @@ pub fn format_summary_csv(snapshot: &StatsSnapshot) -> String {
         snapshot.error_counts.http_5xx,
         snapshot.error_counts.http_other,
         snapshot.error_counts.other,
-    );
+    )
+}
 
-    format!("{header}\n{row}")
+fn rate_limit_label(rate_limit: Option<&RateLimitConfig>) -> String {
+    rate_limit
+        .map(RateLimitConfig::as_display_string)
+        .unwrap_or_else(|| "unlimited".to_string())
 }
 
 fn percentage(value: u64, total: u64) -> f64 {
@@ -600,9 +648,23 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
+            "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
         );
-        assert!(lines[1].starts_with("100,80,20,20.0,"));
+
+        let columns = lines[1].split(',').collect::<Vec<_>>();
+
+        assert_eq!(columns.len(), 18);
+        assert_eq!(columns[0], "100");
+        assert_eq!(columns[1], "80");
+        assert_eq!(columns[2], "20");
+        assert_eq!(columns[3], "20.0");
+        assert_eq!(columns[10], "unlimited");
+        assert_eq!(columns[12], "10");
+        assert_eq!(columns[13], "0");
+        assert_eq!(columns[14], "10");
+        assert_eq!(columns[15], "0");
+        assert_eq!(columns[16], "0");
+        assert_eq!(columns[17], "0");
     }
 
     #[test]
@@ -988,5 +1050,76 @@ mod tests {
         assert!(output.contains("Errors:"));
         assert!(output.contains("Latency (p99):"));
         assert!(output.contains("Throughput:"));
+    }
+
+    #[test]
+    fn format_summary_text_includes_rate_limit_when_present() {
+        let snapshot = summary_snapshot();
+        let rate_limit = RateLimitConfig {
+            rate: 100,
+            period: crate::config::RatePeriod::Second,
+        };
+
+        let output = format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            OutputFormat::Text,
+            false,
+            Some(&rate_limit),
+        );
+
+        assert!(output.contains("Rate Limit:"));
+        assert!(output.contains("100/s"));
+    }
+
+    #[test]
+    fn format_summary_json_includes_rate_limit_when_present() {
+        let snapshot = summary_snapshot();
+        let rate_limit = RateLimitConfig {
+            rate: 100,
+            period: crate::config::RatePeriod::Second,
+        };
+
+        let output = format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            OutputFormat::Json,
+            false,
+            Some(&rate_limit),
+        );
+
+        assert!(output.contains(r#""rate_limit": "100/s""#));
+    }
+
+    #[test]
+    fn format_summary_csv_includes_rate_limit_column() {
+        let snapshot = summary_snapshot();
+        let rate_limit = RateLimitConfig {
+            rate: 100,
+            period: crate::config::RatePeriod::Second,
+        };
+
+        let output = format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            OutputFormat::Csv,
+            false,
+            Some(&rate_limit),
+        );
+
+        assert!(output.contains("throughput_rps,rate_limit,duration_secs"));
+        assert!(output.contains(",100/s,"));
+    }
+
+    #[test]
+    fn format_summary_outputs_unlimited_when_rate_limit_missing() {
+        let snapshot = summary_snapshot();
+
+        let output = format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            OutputFormat::Text,
+            false,
+            None,
+        );
+
+        assert!(output.contains("Rate Limit:"));
+        assert!(output.contains("unlimited"));
     }
 }

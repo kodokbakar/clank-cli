@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clank_cli::config::{
-    ClankConfig, DEFAULT_CONFIG_FILE, OutputFormat, parse_duration, parse_header,
-    parse_output_format, validate_method,
+    ClankConfig, DEFAULT_CONFIG_FILE, OutputFormat, RateLimitConfig, parse_duration, parse_header,
+    parse_output_format, parse_rate_limit, validate_method,
 };
-use clank_cli::engine::{Engine, EngineConfig};
-use clank_cli::stats::format_summary_with_color_and_format;
+use clank_cli::engine::{Engine, EngineConfig, RateLimiter};
+use clank_cli::stats::format_summary_with_rate_limit_and_color_and_format;
 use clap::{ArgAction, Parser};
 use console::Term;
 
@@ -48,6 +49,9 @@ struct Cli {
 
     #[arg(short, long)]
     concurrency: Option<usize>,
+
+    #[arg(short = 'r', long = "rate-limit", value_name = "RATE", value_parser = parse_rate_limit_arg)]
+    rate_limit: Option<RateLimitConfig>,
 
     #[arg(short = 'n', long)]
     requests: Option<usize>,
@@ -100,6 +104,11 @@ async fn main() -> Result<()> {
     let timeout_secs = resolve_timeout_secs(&cli, file_config.as_ref());
     let insecure = resolve_insecure(&cli, file_config.as_ref());
     let output_format = resolve_output_format(&cli, file_config.as_ref())?;
+    let rate_limit = resolve_rate_limit(&cli, file_config.as_ref());
+    let rate_limiter = rate_limit
+        .map(RateLimiter::from_config)
+        .transpose()?
+        .map(Arc::new);
 
     if timeout_secs == 0 {
         bail!("timeout_secs must be greater than 0");
@@ -115,6 +124,8 @@ async fn main() -> Result<()> {
         concurrency,
         timeout: Duration::from_secs(timeout_secs),
         insecure,
+        rate_limit,
+        rate_limiter,
     };
 
     let progress_enabled = !cli.quiet;
@@ -139,7 +150,12 @@ async fn main() -> Result<()> {
 
     println!(
         "{}",
-        format_summary_with_color_and_format(&snapshot, output_format, output_color_enabled)
+        format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            output_format,
+            output_color_enabled,
+            rate_limit.as_ref(),
+        )
     );
 
     Ok(())
@@ -315,12 +331,21 @@ fn resolve_output_format(cli: &Cli, config: Option<&ClankConfig>) -> Result<Outp
     Ok(OutputFormat::Text)
 }
 
+fn resolve_rate_limit(cli: &Cli, config: Option<&ClankConfig>) -> Option<RateLimitConfig> {
+    cli.rate_limit
+        .or_else(|| config.and_then(|config| config.rate_limit))
+}
+
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
 }
 
 fn parse_output_format_arg(value: &str) -> Result<OutputFormat, String> {
     parse_output_format(value).map_err(|error| error.to_string())
+}
+
+fn parse_rate_limit_arg(value: &str) -> Result<RateLimitConfig, String> {
+    parse_rate_limit(value).map_err(|error| error.to_string())
 }
 
 fn parse_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
@@ -347,6 +372,7 @@ mod tests {
             content_type: None,
             headers: Vec::new(),
             concurrency: None,
+            rate_limit: None,
             requests: None,
             duration: None,
             timeout_secs: None,
@@ -370,6 +396,10 @@ mod tests {
             headers: vec!["Authorization: Bearer config".to_string()],
             insecure: true,
             output: Some("json".to_string()),
+            rate_limit: Some(RateLimitConfig {
+                rate: 100,
+                period: clank_cli::config::RatePeriod::Second,
+            }),
         }
     }
 
@@ -734,5 +764,56 @@ mod tests {
         cli.content_type = Some(" ".to_string());
 
         assert!(resolve_headers(&cli, None).is_err());
+    }
+
+    #[test]
+    fn resolve_rate_limit_prefers_cli_over_config() {
+        let mut cli = cli();
+        cli.rate_limit = Some(RateLimitConfig {
+            rate: 10,
+            period: clank_cli::config::RatePeriod::Second,
+        });
+
+        assert_eq!(
+            resolve_rate_limit(&cli, Some(&config())),
+            Some(RateLimitConfig {
+                rate: 10,
+                period: clank_cli::config::RatePeriod::Second,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_rate_limit_uses_config_when_cli_missing() {
+        assert_eq!(
+            resolve_rate_limit(&cli(), Some(&config())),
+            Some(RateLimitConfig {
+                rate: 100,
+                period: clank_cli::config::RatePeriod::Second,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_rate_limit_uses_none_when_cli_and_config_missing() {
+        assert_eq!(resolve_rate_limit(&cli(), None), None);
+    }
+
+    #[test]
+    fn parse_rate_limit_arg_accepts_supported_format() -> Result<()> {
+        assert_eq!(
+            parse_rate_limit_arg("5000/m").map_err(anyhow::Error::msg)?,
+            RateLimitConfig {
+                rate: 5000,
+                period: clank_cli::config::RatePeriod::Minute,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_rate_limit_arg_rejects_invalid_format() {
+        assert!(parse_rate_limit_arg("10/d").is_err());
     }
 }

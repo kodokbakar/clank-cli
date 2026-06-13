@@ -16,6 +16,7 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - Custom headers and request body (inline or from file)
 - Supports GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
 - Cross-platform: Linux, macOS, Windows
+- Rate limiting with `--rate-limit` (`N/s`, `N/m`, `N/h`)
 
 ## Installation
 
@@ -76,6 +77,12 @@ clank-cli https://localhost:3000 -k
 
 # Quiet mode (no progress bar)
 clank-cli https://api.example.com -q
+
+# Limit to 100 requests per second
+clank-cli https://api.example.com --rate-limit 100/s --duration 30s
+
+# Limit to 5000 requests per minute
+clank-cli https://api.example.com -r 5000/m -d 1m
 ```
 
 ### Config file
@@ -88,12 +95,45 @@ method: POST
 body: '{"name": "test"}'
 concurrency: 20
 timeout_secs: 30
+rate_limit: 100/s
 headers:
   - "Authorization: Bearer TOKEN_HERE"
   - "Content-Type: application/json"
 ```
 
 CLI arguments override config file values. Use `--config <path>` to specify a custom config file, or `--no-config` to skip it entirely.
+
+## Rate Limiting
+
+Use `--rate-limit` or `-r` to throttle request throughput across all workers.
+
+Supported formats:
+
+| Format | Meaning |
+|--------|---------|
+| `100/s` | 100 requests per second |
+| `5000/m` | 5000 requests per minute |
+| `10000/h` | 10000 requests per hour |
+
+Examples:
+
+```bash
+# Limit to 100 requests per second
+clank-cli --url http://localhost:8080 --rate-limit 100/s --duration 30s
+
+# Limit to 5000 requests per minute
+clank-cli --url http://localhost:8080 -r 5000/m -d 1m
+```
+
+You can also configure rate limiting in `clank.yaml`:
+
+```yaml
+rate_limit: 5000/m
+```
+
+CLI arguments override config file values, so `--rate-limit` takes priority over `rate_limit` in `clank.yaml`.
+
+Rate limiting does not reduce concurrent connections. It only throttles request timing across all concurrent workers.
 
 ## CLI Reference
 
@@ -102,6 +142,7 @@ CLI arguments override config file values. Use `--config <path>` to specify a cu
 | `[URL]` / `--url` | | Target URL (required) | — |
 | `-X, --method` | `-X` | HTTP method | GET |
 | `-c, --concurrency` | `-c` | Concurrent workers | 10 |
+| `-r, --rate-limit` | `-r` | Limit request rate (`100/s`, `5000/m`, `10000/h`) | unlimited |
 | `-n, --requests` | `-n` | Total requests to send | until Ctrl+C |
 | `-d, --duration` | `-d` | Run duration (`5s`, `5m`, `1h30m`) | until Ctrl+C |
 | `--body` | | Request body (inline) | — |
@@ -142,6 +183,7 @@ Latency (p95):     78.0ms
 Latency (p99):     156.7ms
 Latency (p999):    230.1ms
 Throughput:        123.4 req/s
+Rate Limit:        100/s
 Duration:          10.00s
 ────────────────────────────────
 ```
@@ -162,6 +204,7 @@ Duration:          10.00s
     "p999_ms": 230.1
   },
   "throughput_rps": 123.4,
+  "rate_limit": "100/s",
   "duration_secs": 10.0,
   "error_breakdown": {
     "timeout": 12,
@@ -177,8 +220,8 @@ Duration:          10.00s
 ### CSV (`-o csv`)
 
 ```
-total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
-1234,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,10.00,12,8,14,0,0,0
+total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
+1234,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
 ```
 
 ## Build from Source

@@ -3,6 +3,7 @@ method: POST
 body: '{"name":"test"}'
 concurrency: 20
 timeout_secs: 30
+rate_limit: 100/s
 headers:
   - "Authorization: Bearer token123"
   - "Content-Type: application/json"
