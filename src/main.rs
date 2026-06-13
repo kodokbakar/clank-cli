@@ -9,7 +9,7 @@ use clank_cli::config::{
     parse_output_format, parse_rate_limit, validate_method,
 };
 use clank_cli::engine::{Engine, EngineConfig, RateLimiter};
-use clank_cli::stats::format_summary_with_color_and_format;
+use clank_cli::stats::format_summary_with_rate_limit_and_color_and_format;
 use clap::{ArgAction, Parser};
 use console::Term;
 
@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
         concurrency,
         timeout: Duration::from_secs(timeout_secs),
         insecure,
+        rate_limit,
         rate_limiter,
     };
 
@@ -149,7 +150,12 @@ async fn main() -> Result<()> {
 
     println!(
         "{}",
-        format_summary_with_color_and_format(&snapshot, output_format, output_color_enabled)
+        format_summary_with_rate_limit_and_color_and_format(
+            &snapshot,
+            output_format,
+            output_color_enabled,
+            rate_limit.as_ref(),
+        )
     );
 
     Ok(())

@@ -9,5 +9,7 @@ pub use color::{
     warning,
 };
 pub use eta::EtaEstimator;
-pub use live_stats::{LiveStats, format_live, format_live_with_color};
+pub use live_stats::{
+    LiveStats, format_live, format_live_with_color, format_live_with_rate_limit_and_color,
+};
 pub use progress::ProgressTracker;

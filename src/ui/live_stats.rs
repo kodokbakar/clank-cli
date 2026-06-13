@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::ui::{error_rate_color, latency_color, maybe_color, throughput_color};
+use crate::config::RateLimitConfig;
+use crate::ui::{ColorMode, error_rate_color, latency_color, maybe_color, throughput_color};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LiveStats {
@@ -98,6 +99,80 @@ pub fn format_live_with_color(stats: &LiveStats, color_enabled: bool) -> String 
     )
 }
 
+pub fn format_live_with_rate_limit_and_color(
+    stats: &LiveStats,
+    rate_limit: Option<&RateLimitConfig>,
+    color_enabled: bool,
+) -> String {
+    let error_percentage = if stats.total_requests == 0 {
+        0.0
+    } else {
+        stats.errors as f64 / stats.total_requests as f64 * 100.0
+    };
+
+    let rps = maybe_color(
+        &format!("{:.1} req/s", stats.current_rps),
+        throughput_color(stats.current_rps),
+        color_enabled,
+    );
+
+    let rate_limit_text = format_rate_limit_live(stats, rate_limit);
+
+    let rate_limit = maybe_color(
+        &rate_limit_text,
+        rate_limit_color(stats, rate_limit),
+        color_enabled,
+    );
+
+    let avg = maybe_color(
+        &format!("avg {:.1}ms", stats.avg_latency_ms),
+        latency_color(stats.avg_latency_ms),
+        color_enabled,
+    );
+
+    let errors = maybe_color(
+        &format!("{} errors", format_number(stats.errors)),
+        error_rate_color(error_percentage),
+        color_enabled,
+    );
+
+    format!(
+        "{} req | {} | {} | {} | {}",
+        format_number(stats.total_requests),
+        rps,
+        rate_limit,
+        avg,
+        errors
+    )
+}
+
+fn format_rate_limit_live(stats: &LiveStats, rate_limit: Option<&RateLimitConfig>) -> String {
+    match rate_limit {
+        Some(rate_limit) => format!(
+            "Rate Limit: {} ({:.1}/{:.1} req/s)",
+            rate_limit,
+            stats.current_rps,
+            rate_limit.requests_per_second()
+        ),
+        None => "Rate Limit: unlimited".to_string(),
+    }
+}
+
+fn rate_limit_color(stats: &LiveStats, rate_limit: Option<&RateLimitConfig>) -> ColorMode {
+    match rate_limit {
+        Some(rate_limit) => {
+            let limit = rate_limit.requests_per_second();
+
+            if limit > 0.0 && stats.current_rps >= limit * 0.9 {
+                ColorMode::Warning
+            } else {
+                ColorMode::Success
+            }
+        }
+        None => ColorMode::Success,
+    }
+}
+
 fn format_number(value: u64) -> String {
     let digits = value.to_string();
     let mut result = String::new();
@@ -171,5 +246,29 @@ mod tests {
             LiveStats::calculate(Duration::from_secs(10), 1_234, 1_200, 34, 45.2, 10.0, 100.0);
 
         assert_eq!(format_live(&stats), format_live_with_color(&stats, false));
+    }
+
+    #[test]
+    fn format_live_with_rate_limit_includes_limit_and_actual_rps() {
+        let stats = LiveStats::calculate(Duration::from_secs(10), 900, 900, 0, 45.2, 10.0, 100.0);
+        let rate_limit = RateLimitConfig {
+            rate: 100,
+            period: crate::config::RatePeriod::Second,
+        };
+
+        let output = format_live_with_rate_limit_and_color(&stats, Some(&rate_limit), false);
+
+        assert!(output.contains("Rate Limit: 100/s"));
+        assert!(output.contains("90.0/100.0 req/s"));
+    }
+
+    #[test]
+    fn format_live_with_rate_limit_shows_unlimited_when_missing() {
+        let stats =
+            LiveStats::calculate(Duration::from_secs(10), 1_234, 1_200, 34, 45.2, 10.0, 100.0);
+
+        let output = format_live_with_rate_limit_and_color(&stats, None, false);
+
+        assert!(output.contains("Rate Limit: unlimited"));
     }
 }

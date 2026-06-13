@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- Rate limiting with `--rate-limit` / `-r`.
+- Rate limit config support through `clank.yaml`.
+- Rate limit formats: `N/s`, `N/m`, and `N/h`.
+- Live stats display for active rate limit and actual throughput.
+- Rate limit field in text, JSON, and CSV output summaries.
+- Documentation and examples for rate limiting.
+
+### Changed
+
+- Output summary now includes `Rate Limit: unlimited` when no rate limit is active.
+
 ## [0.1.0] - 2026-06-10
 
 ### Added

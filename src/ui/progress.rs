@@ -8,7 +8,8 @@ use console::Term;
 use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use tokio::task::JoinHandle;
 
-use crate::ui::{EtaEstimator, LiveStats, format_live_with_color, warning};
+use crate::config::RateLimitConfig;
+use crate::ui::{EtaEstimator, LiveStats, format_live_with_rate_limit_and_color, warning};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -25,12 +26,13 @@ pub struct ProgressTracker {
     started_at: Instant,
     duration: Option<Duration>,
     color_enabled: bool,
+    rate_limit: Option<RateLimitConfig>,
     eta: Option<Arc<Mutex<EtaEstimator>>>,
 }
 
 impl ProgressTracker {
     pub fn new(total_requests: Option<u64>, duration: Option<Duration>, enabled: bool) -> Self {
-        Self::new_with_color(total_requests, duration, enabled, true)
+        Self::new_with_color(total_requests, duration, enabled, enabled)
     }
 
     pub fn new_with_color(
@@ -45,6 +47,23 @@ impl ProgressTracker {
             enabled,
             Term::stderr().is_term(),
             color_enabled,
+        )
+    }
+
+    pub fn new_with_color_and_rate_limit(
+        total_requests: Option<u64>,
+        duration: Option<Duration>,
+        enabled: bool,
+        color_enabled: bool,
+        rate_limit: Option<RateLimitConfig>,
+    ) -> Self {
+        Self::with_terminal_color_and_rate_limit(
+            total_requests,
+            duration,
+            enabled,
+            Term::stderr().is_term(),
+            color_enabled,
+            rate_limit,
         )
     }
 
@@ -65,8 +84,11 @@ impl ProgressTracker {
             return;
         }
 
-        self.bar
-            .set_prefix(format_live_with_color(stats, self.color_enabled));
+        self.bar.set_prefix(format_live_with_rate_limit_and_color(
+            stats,
+            self.rate_limit.as_ref(),
+            self.color_enabled,
+        ));
     }
 
     pub fn finish(&self) {
@@ -126,6 +148,26 @@ impl ProgressTracker {
         is_terminal: bool,
         color_enabled: bool,
     ) -> Self {
+        Self::with_terminal_color_and_rate_limit(
+            total_requests,
+            duration,
+            enabled,
+            is_terminal,
+            color_enabled,
+            None,
+        )
+    }
+
+    fn with_terminal_color_and_rate_limit(
+        total_requests: Option<u64>,
+        duration: Option<Duration>,
+        enabled: bool,
+        is_terminal: bool,
+        color_enabled: bool,
+        rate_limit: Option<RateLimitConfig>,
+    ) -> Self {
+        let effective_color_enabled = enabled && is_terminal && color_enabled;
+
         if !enabled || !is_terminal {
             return Self {
                 bar: IndicatifProgressBar::hidden(),
@@ -133,15 +175,22 @@ impl ProgressTracker {
                 started_at: Instant::now(),
                 duration,
                 color_enabled: false,
+                rate_limit,
                 eta: None,
             };
         }
 
-        match (total_requests, duration) {
-            (Some(total_requests), _) => Self::request_based(total_requests, color_enabled),
-            (None, Some(duration)) => Self::duration_based(duration, color_enabled),
-            (None, None) => Self::spinner(color_enabled),
-        }
+        let mut tracker = match (total_requests, duration) {
+            (Some(total_requests), _) => {
+                Self::request_based(total_requests, effective_color_enabled)
+            }
+            (None, Some(duration)) => Self::duration_based(duration, effective_color_enabled),
+            (None, None) => Self::spinner(effective_color_enabled),
+        };
+
+        tracker.rate_limit = rate_limit;
+
+        tracker
     }
 
     fn request_based(total_requests: u64, color_enabled: bool) -> Self {
@@ -166,6 +215,7 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: None,
             color_enabled,
+            rate_limit: None,
             eta: Some(Arc::new(Mutex::new(EtaEstimator::new(Some(
                 total_requests,
             ))))),
@@ -195,6 +245,7 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: Some(duration),
             color_enabled,
+            rate_limit: None,
             eta: Some(Arc::new(Mutex::new(EtaEstimator::new(Some(total_millis))))),
         }
     }
@@ -219,6 +270,7 @@ impl ProgressTracker {
             started_at: Instant::now(),
             duration: None,
             color_enabled,
+            rate_limit: None,
             eta: None,
         }
     }
@@ -474,6 +526,25 @@ mod tests {
         let tracker = ProgressTracker::with_terminal_and_color(None, None, true, true, true);
 
         tracker.tick();
+        tracker.finish();
+    }
+
+    #[test]
+    fn tracker_accepts_rate_limit_for_live_stats() {
+        let tracker = ProgressTracker::new_with_color_and_rate_limit(
+            Some(10),
+            None,
+            true,
+            false,
+            Some(RateLimitConfig {
+                rate: 100,
+                period: crate::config::RatePeriod::Second,
+            }),
+        );
+
+        let stats = LiveStats::calculate(Duration::from_secs(10), 100, 90, 10, 45.0, 10.0, 120.0);
+
+        tracker.update_live_stats(&stats);
         tracker.finish();
     }
 }

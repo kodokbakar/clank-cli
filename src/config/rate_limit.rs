@@ -1,3 +1,4 @@
+use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -29,6 +30,14 @@ impl RateLimitConfig {
     pub fn interval(&self) -> Duration {
         self.period.duration()
     }
+
+    pub fn requests_per_second(&self) -> f64 {
+        self.rate as f64 / self.interval().as_secs_f64()
+    }
+
+    pub fn as_display_string(&self) -> String {
+        format!("{}/{}", self.rate, self.period.suffix())
+    }
 }
 
 impl RatePeriod {
@@ -38,6 +47,20 @@ impl RatePeriod {
             Self::Minute => Duration::from_secs(60),
             Self::Hour => Duration::from_secs(60 * 60),
         }
+    }
+
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Self::Second => "s",
+            Self::Minute => "m",
+            Self::Hour => "h",
+        }
+    }
+}
+
+impl fmt::Display for RateLimitConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.as_display_string())
     }
 }
 
@@ -214,5 +237,65 @@ period: second
         assert!(result.is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn rate_limit_config_formats_display_string() {
+        assert_eq!(
+            RateLimitConfig {
+                rate: 100,
+                period: RatePeriod::Second,
+            }
+            .as_display_string(),
+            "100/s"
+        );
+
+        assert_eq!(
+            RateLimitConfig {
+                rate: 5000,
+                period: RatePeriod::Minute,
+            }
+            .as_display_string(),
+            "5000/m"
+        );
+
+        assert_eq!(
+            RateLimitConfig {
+                rate: 10000,
+                period: RatePeriod::Hour,
+            }
+            .as_display_string(),
+            "10000/h"
+        );
+    }
+
+    #[test]
+    fn rate_limit_config_calculates_requests_per_second() {
+        assert_eq!(
+            RateLimitConfig {
+                rate: 100,
+                period: RatePeriod::Second,
+            }
+            .requests_per_second(),
+            100.0
+        );
+
+        assert_eq!(
+            RateLimitConfig {
+                rate: 6000,
+                period: RatePeriod::Minute,
+            }
+            .requests_per_second(),
+            100.0
+        );
+
+        assert_eq!(
+            RateLimitConfig {
+                rate: 3600,
+                period: RatePeriod::Hour,
+            }
+            .requests_per_second(),
+            1.0
+        );
     }
 }

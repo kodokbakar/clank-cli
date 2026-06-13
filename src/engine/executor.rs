@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::config::RateLimitConfig;
 use crate::engine::http_client::{HttpClient, HttpErrorKind};
 use crate::engine::rate_limiter::RateLimiter;
 use crate::stats::{ErrorCategory, StatsCollector, StatsSnapshot};
@@ -23,6 +24,7 @@ pub struct EngineConfig {
     pub concurrency: usize,
     pub timeout: Duration,
     pub insecure: bool,
+    pub rate_limit: Option<RateLimitConfig>,
     pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
@@ -37,6 +39,7 @@ impl EngineConfig {
             timeout: Duration::from_secs(10),
             insecure: false,
             rate_limiter: None,
+            rate_limit: None,
         }
     }
 }
@@ -49,6 +52,7 @@ pub struct Engine {
     progress_enabled: bool,
     color_enabled: bool,
     live_stats_interval: Duration,
+    rate_limit: Option<RateLimitConfig>,
     rate_limiter: Option<Arc<RateLimiter>>,
 }
 
@@ -106,6 +110,8 @@ impl Engine {
 
         let rate_limiter = config.rate_limiter.as_ref().map(Arc::clone);
 
+        let rate_limit = config.rate_limit;
+
         Ok(Self {
             config,
             client,
@@ -114,6 +120,7 @@ impl Engine {
             color_enabled: progress_enabled && color_enabled,
             live_stats_interval,
             rate_limiter,
+            rate_limit,
         })
     }
 
@@ -133,8 +140,13 @@ impl Engine {
     pub async fn run(&self) -> Result<StatsSnapshot> {
         self.reset_timer();
 
-        let progress =
-            ProgressTracker::new_with_color(None, None, self.progress_enabled, self.color_enabled);
+        let progress = ProgressTracker::new_with_color_and_rate_limit(
+            None,
+            None,
+            self.progress_enabled,
+            self.color_enabled,
+            self.rate_limit,
+        );
 
         self.run_until_shutdown(wait_for_interrupt_signal(), progress)
             .await
@@ -147,11 +159,12 @@ impl Engine {
 
         self.reset_timer();
 
-        let progress = ProgressTracker::new_with_color(
+        let progress = ProgressTracker::new_with_color_and_rate_limit(
             None,
             Some(duration),
             self.progress_enabled,
             self.color_enabled,
+            self.rate_limit,
         );
 
         self.run_until_shutdown(
@@ -179,11 +192,12 @@ impl Engine {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let remaining_requests = Arc::new(AtomicUsize::new(total_requests));
-        let progress = ProgressTracker::new_with_color(
+        let progress = ProgressTracker::new_with_color_and_rate_limit(
             Some(total_requests as u64),
             None,
             self.progress_enabled,
             self.color_enabled,
+            self.rate_limit,
         );
 
         let handles = self.spawn_workers(
@@ -523,6 +537,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_millis(300),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -560,6 +575,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -610,6 +626,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -700,6 +717,7 @@ mod tests {
             concurrency: 5,
             timeout: Duration::from_millis(50),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -847,6 +865,7 @@ mod tests {
             concurrency: 1,
             timeout: Duration::from_millis(50),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -912,6 +931,7 @@ mod tests {
             concurrency: 5,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -980,6 +1000,7 @@ mod tests {
             concurrency: 2,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -1013,6 +1034,10 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: Some(RateLimitConfig {
+                rate: 10,
+                period: crate::config::RatePeriod::Second,
+            }),
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
         };
 
@@ -1047,6 +1072,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: None,
             rate_limiter: None,
         };
 
@@ -1081,6 +1107,10 @@ mod tests {
             concurrency: 5,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limit: Some(RateLimitConfig {
+                rate: 10,
+                period: crate::config::RatePeriod::Second,
+            }),
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
         };
 
