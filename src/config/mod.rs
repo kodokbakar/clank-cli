@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+pub mod rate_limit;
+
+pub use rate_limit::{RateLimitConfig, RatePeriod, parse_rate_limit};
 
 pub const DEFAULT_CONFIG_FILE: &str = "clank.yaml";
 
@@ -56,6 +59,8 @@ pub struct ClankConfig {
     pub insecure: bool,
     #[serde(default)]
     pub output: Option<String>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 impl ClankConfig {
@@ -120,6 +125,12 @@ impl ClankConfig {
 
         if let Some(output) = &self.output {
             parse_output_format(output).with_context(|| "invalid config output format")?;
+        }
+
+        if let Some(rate_limit) = &self.rate_limit {
+            rate_limit
+                .validate()
+                .with_context(|| "invalid config rate limit")?;
         }
 
         Ok(())
@@ -353,6 +364,7 @@ headers:
   - "Authorization: Bearer token123"
   - "Content-Type: text/plain"
 insecure: true
+rate_limit: 100/s
 "#,
         )?;
 
@@ -367,6 +379,13 @@ insecure: true
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.headers.len(), 2);
         assert!(config.insecure);
+        assert_eq!(
+            config.rate_limit,
+            Some(RateLimitConfig {
+                rate: 100,
+                period: RatePeriod::Second,
+            })
+        );
 
         fs::remove_file(path)?;
 
@@ -392,6 +411,7 @@ url: http://localhost:3000/api
         assert!(config.headers.is_empty());
         assert!(!config.insecure);
         assert_eq!(config.output, None);
+        assert_eq!(config.rate_limit, None);
 
         Ok(())
     }
@@ -573,6 +593,66 @@ content_type: " "
         )?;
 
         assert!(config.validate().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_accepts_rate_limit_string() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+rate_limit: 10/s
+"#,
+        )?;
+
+        config.validate()?;
+
+        assert_eq!(
+            config.rate_limit,
+            Some(RateLimitConfig {
+                rate: 10,
+                period: RatePeriod::Second,
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_accepts_rate_limit_object() -> Result<()> {
+        let config: ClankConfig = serde_yaml::from_str(
+            r#"
+url: http://localhost:3000/api
+rate_limit:
+  rate: 500
+  period: minute
+"#,
+        )?;
+
+        config.validate()?;
+
+        assert_eq!(
+            config.rate_limit,
+            Some(RateLimitConfig {
+                rate: 500,
+                period: RatePeriod::Minute,
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn clank_config_rejects_invalid_rate_limit() -> Result<()> {
+        let result = serde_yaml::from_str::<ClankConfig>(
+            r#"
+url: http://localhost:3000/api
+rate_limit: 0/s
+"#,
+        );
+
+        assert!(result.is_err());
 
         Ok(())
     }

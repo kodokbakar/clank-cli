@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::engine::http_client::{HttpClient, HttpErrorKind};
+use crate::engine::rate_limiter::RateLimiter;
 use crate::stats::{ErrorCategory, StatsCollector, StatsSnapshot};
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,7 @@ pub struct EngineConfig {
     pub concurrency: usize,
     pub timeout: Duration,
     pub insecure: bool,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl EngineConfig {
@@ -34,6 +36,7 @@ impl EngineConfig {
             concurrency,
             timeout: Duration::from_secs(10),
             insecure: false,
+            rate_limiter: None,
         }
     }
 }
@@ -46,6 +49,7 @@ pub struct Engine {
     progress_enabled: bool,
     color_enabled: bool,
     live_stats_interval: Duration,
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,8 @@ impl Engine {
 
         let client = HttpClient::new(config.timeout, config.insecure)?;
 
+        let rate_limiter = config.rate_limiter.as_ref().map(Arc::clone);
+
         Ok(Self {
             config,
             client,
@@ -107,6 +113,7 @@ impl Engine {
             progress_enabled,
             color_enabled: progress_enabled && color_enabled,
             live_stats_interval,
+            rate_limiter,
         })
     }
 
@@ -289,6 +296,7 @@ impl Engine {
             let url = self.config.url.clone();
             let body = self.config.body.clone();
             let headers = self.config.headers.clone();
+            let rate_limiter = self.rate_limiter.as_ref().map(Arc::clone);
 
             let progress = progress.clone();
 
@@ -308,6 +316,16 @@ impl Engine {
                         if !has_request_slot {
                             break;
                         }
+                    }
+
+                    if let Some(rate_limiter) = rate_limiter.as_ref()
+                        && !acquire_rate_limit(rate_limiter, shutdown.as_ref()).await
+                    {
+                        break;
+                    }
+
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
                     }
 
                     let result = client.send(&method, &url, body.clone(), &headers).await;
@@ -395,6 +413,21 @@ fn error_category(kind: HttpErrorKind) -> ErrorCategory {
         HttpErrorKind::Connection => ErrorCategory::Connection,
         HttpErrorKind::Request | HttpErrorKind::UnsupportedMethod | HttpErrorKind::Other => {
             ErrorCategory::Other
+        }
+    }
+}
+
+async fn acquire_rate_limit(rate_limiter: &RateLimiter, shutdown: &AtomicBool) -> bool {
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        tokio::select! {
+            () = rate_limiter.acquire() => {
+                return !shutdown.load(Ordering::SeqCst);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
     }
 }
@@ -490,6 +523,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_millis(300),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -526,6 +560,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -575,6 +610,7 @@ mod tests {
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -664,6 +700,7 @@ mod tests {
             concurrency: 5,
             timeout: Duration::from_millis(50),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -810,6 +847,7 @@ mod tests {
             concurrency: 1,
             timeout: Duration::from_millis(50),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -874,6 +912,7 @@ mod tests {
             concurrency: 5,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -941,6 +980,7 @@ mod tests {
             concurrency: 2,
             timeout: Duration::from_secs(1),
             insecure: false,
+            rate_limiter: None,
         };
 
         let engine = Engine::new(config)?;
@@ -950,6 +990,111 @@ mod tests {
         assert_eq!(snapshot.successful_requests, 5);
         assert_eq!(snapshot.total_errors, 0);
         assert_eq!(mock.calls_async().await, 5);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_duration_respects_rate_limit() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let _mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/rate-limited");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/rate-limited"),
+            method: "GET".to_string(),
+            body: None,
+            headers: Vec::new(),
+            concurrency: 10,
+            timeout: Duration::from_secs(1),
+            insecure: false,
+            rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_duration(Duration::from_secs(1)).await?;
+
+        assert!(
+            (9..=11).contains(&snapshot.total_requests),
+            "expected about 10 requests, got {}",
+            snapshot.total_requests
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_duration_without_rate_limit_remains_unlimited() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let _mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/unlimited");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/unlimited"),
+            method: "GET".to_string(),
+            body: None,
+            headers: Vec::new(),
+            concurrency: 10,
+            timeout: Duration::from_secs(1),
+            insecure: false,
+            rate_limiter: None,
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_duration(Duration::from_millis(200)).await?;
+
+        assert!(
+            snapshot.total_requests > 20,
+            "expected unlimited mode to send significantly more than 20 requests, got {}",
+            snapshot.total_requests
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_for_duration_with_rate_limit_throttles_requests() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/rate-limited");
+                then.status(200).body("ok");
+            })
+            .await;
+
+        let config = EngineConfig {
+            url: server.url("/rate-limited"),
+            method: "GET".to_string(),
+            body: None,
+            headers: Vec::new(),
+            concurrency: 5,
+            timeout: Duration::from_secs(1),
+            insecure: false,
+            rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_duration(Duration::from_secs(3)).await?;
+
+        assert_eq!(snapshot.total_errors, 0);
+        assert_eq!(mock.calls_async().await as u64, snapshot.total_requests);
+
+        assert!(
+            (25..=35).contains(&snapshot.total_requests),
+            "expected about 30 requests for 10/s over 3s, got {}",
+            snapshot.total_requests
+        );
 
         Ok(())
     }
