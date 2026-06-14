@@ -26,6 +26,8 @@ pub struct EngineConfig {
     pub insecure: bool,
     pub rate_limit: Option<RateLimitConfig>,
     pub rate_limiter: Option<Arc<RateLimiter>>,
+    pub ramp_up: Option<Duration>,
+    pub ramp_up_step: usize,
 }
 
 impl EngineConfig {
@@ -40,6 +42,8 @@ impl EngineConfig {
             insecure: false,
             rate_limiter: None,
             rate_limit: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         }
     }
 }
@@ -60,6 +64,65 @@ pub struct Engine {
 enum ShutdownReason {
     Completed,
     Interrupted,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RampUpState {
+    current_workers: usize,
+    target_workers: usize,
+    step_interval: Duration,
+    last_ramp_up: Instant,
+}
+
+impl RampUpState {
+    fn new(
+        target_workers: usize,
+        ramp_up_duration: Duration,
+        ramp_up_step: usize,
+        now: Instant,
+    ) -> Self {
+        let step_interval =
+            calculate_ramp_up_step_interval(target_workers, ramp_up_duration, ramp_up_step);
+
+        Self {
+            current_workers: ramp_up_step.min(target_workers),
+            target_workers,
+            step_interval,
+            last_ramp_up: now,
+        }
+    }
+
+    fn advance(&mut self, now: Instant, ramp_up_step: usize) -> usize {
+        if self.current_workers >= self.target_workers {
+            return 0;
+        }
+
+        if now.duration_since(self.last_ramp_up) < self.step_interval {
+            return 0;
+        }
+
+        let remaining_workers = self.target_workers - self.current_workers;
+        let added_workers = ramp_up_step.min(remaining_workers);
+
+        self.current_workers += added_workers;
+        self.last_ramp_up = now;
+
+        added_workers
+    }
+}
+
+#[derive(Clone)]
+struct WorkerContext {
+    shutdown: Arc<AtomicBool>,
+    remaining_requests: Option<Arc<AtomicUsize>>,
+    stats: Arc<Mutex<StatsCollector>>,
+    client: HttpClient,
+    method: String,
+    url: String,
+    body: Option<String>,
+    headers: Vec<(String, String)>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    progress: ProgressTracker,
 }
 
 impl Engine {
@@ -100,6 +163,10 @@ impl Engine {
 
         if config.concurrency == 0 {
             bail!("concurrency must be greater than 0");
+        }
+
+        if config.ramp_up_step == 0 {
+            bail!("ramp-up step must be greater than 0");
         }
 
         if live_stats_interval.is_zero() {
@@ -299,72 +366,35 @@ impl Engine {
         remaining_requests: Option<Arc<AtomicUsize>>,
         progress: ProgressTracker,
     ) -> Vec<JoinHandle<()>> {
-        let mut handles = Vec::with_capacity(self.config.concurrency);
+        let worker_context = WorkerContext {
+            shutdown,
+            remaining_requests,
+            stats: Arc::clone(&self.stats),
+            client: self.client.clone(),
+            method: self.config.method.clone(),
+            url: self.config.url.clone(),
+            body: self.config.body.clone(),
+            headers: self.config.headers.clone(),
+            rate_limiter: self.rate_limiter.as_ref().map(Arc::clone),
+            progress,
+        };
 
-        for _ in 0..self.config.concurrency {
-            let shutdown = Arc::clone(&shutdown);
-            let remaining_requests = remaining_requests.as_ref().map(Arc::clone);
-            let stats = Arc::clone(&self.stats);
-            let client = self.client.clone();
-            let method = self.config.method.clone();
-            let url = self.config.url.clone();
-            let body = self.config.body.clone();
-            let headers = self.config.headers.clone();
-            let rate_limiter = self.rate_limiter.as_ref().map(Arc::clone);
+        if let Some(ramp_up_duration) = self.config.ramp_up.filter(|duration| !duration.is_zero()) {
+            let ramp_up_state = RampUpState::new(
+                self.config.concurrency,
+                ramp_up_duration,
+                self.config.ramp_up_step,
+                Instant::now(),
+            );
 
-            let progress = progress.clone();
-
-            let handle = tokio::spawn(async move {
-                loop {
-                    if shutdown.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    if let Some(counter) = remaining_requests.as_ref() {
-                        let has_request_slot = counter
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                                current.checked_sub(1)
-                            })
-                            .is_ok();
-
-                        if !has_request_slot {
-                            break;
-                        }
-                    }
-
-                    if let Some(rate_limiter) = rate_limiter.as_ref()
-                        && !acquire_rate_limit(rate_limiter, shutdown.as_ref()).await
-                    {
-                        break;
-                    }
-
-                    if shutdown.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    let result = client.send(&method, &url, body.clone(), &headers).await;
-
-                    match result {
-                        Ok(response) => {
-                            let mut stats = lock_stats(stats.as_ref());
-                            stats.record(response.latency, response.status.as_u16());
-                        }
-                        Err(error) => {
-                            let category = error_category(error.kind());
-                            let mut stats = lock_stats(stats.as_ref());
-
-                            stats.record_error(category, error);
-                        }
-                    }
-
-                    progress.tick();
-                }
-            });
-
-            handles.push(handle);
+            return vec![spawn_ramp_up_workers(
+                worker_context,
+                ramp_up_state,
+                self.config.ramp_up_step,
+            )];
         }
 
-        handles
+        spawn_worker_batch(self.config.concurrency, worker_context)
     }
 
     fn spawn_live_stats_updater(
@@ -414,11 +444,168 @@ impl Engine {
     }
 }
 
+fn spawn_ramp_up_workers(
+    worker_context: WorkerContext,
+    mut ramp_up_state: RampUpState,
+    ramp_up_step: usize,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut handles = spawn_worker_batch(ramp_up_state.current_workers, worker_context.clone());
+
+        while ramp_up_state.current_workers < ramp_up_state.target_workers {
+            if worker_context.shutdown.load(Ordering::SeqCst)
+                || has_no_remaining_requests(&worker_context)
+            {
+                break;
+            }
+
+            if !sleep_or_shutdown(
+                ramp_up_state.step_interval,
+                worker_context.shutdown.as_ref(),
+            )
+            .await
+            {
+                break;
+            }
+
+            if has_no_remaining_requests(&worker_context) {
+                break;
+            }
+
+            let added_workers = ramp_up_state.advance(Instant::now(), ramp_up_step);
+
+            if added_workers > 0 {
+                handles.extend(spawn_worker_batch(added_workers, worker_context.clone()));
+            }
+        }
+
+        for handle in handles {
+            if let Err(error) = handle.await {
+                panic!("ramp-up worker task failed: {error}");
+            }
+        }
+    })
+}
+
+fn spawn_worker_batch(count: usize, worker_context: WorkerContext) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        handles.push(spawn_worker(worker_context.clone()));
+    }
+
+    handles
+}
+
+fn spawn_worker(worker_context: WorkerContext) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if worker_context.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if let Some(counter) = worker_context.remaining_requests.as_ref() {
+                let has_request_slot = counter
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        current.checked_sub(1)
+                    })
+                    .is_ok();
+
+                if !has_request_slot {
+                    break;
+                }
+            }
+
+            if let Some(rate_limiter) = worker_context.rate_limiter.as_ref()
+                && !acquire_rate_limit(rate_limiter, worker_context.shutdown.as_ref()).await
+            {
+                break;
+            }
+
+            if worker_context.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let result = worker_context
+                .client
+                .send(
+                    &worker_context.method,
+                    &worker_context.url,
+                    worker_context.body.clone(),
+                    &worker_context.headers,
+                )
+                .await;
+
+            match result {
+                Ok(response) => {
+                    let mut stats = lock_stats(worker_context.stats.as_ref());
+                    stats.record(response.latency, response.status.as_u16());
+                }
+                Err(error) => {
+                    let category = error_category(error.kind());
+                    let mut stats = lock_stats(worker_context.stats.as_ref());
+
+                    stats.record_error(category, error);
+                }
+            }
+
+            worker_context.progress.tick();
+        }
+    })
+}
+
+fn has_no_remaining_requests(worker_context: &WorkerContext) -> bool {
+    worker_context
+        .remaining_requests
+        .as_ref()
+        .is_some_and(|counter| counter.load(Ordering::SeqCst) == 0)
+}
+
+async fn sleep_or_shutdown(duration: Duration, shutdown: &AtomicBool) -> bool {
+    if duration.is_zero() {
+        return !shutdown.load(Ordering::SeqCst);
+    }
+
+    let sleep = tokio::time::sleep(duration);
+    tokio::pin!(sleep);
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        tokio::select! {
+            _ = &mut sleep => {
+                return !shutdown.load(Ordering::SeqCst);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
 fn lock_stats(stats: &Mutex<StatsCollector>) -> MutexGuard<'_, StatsCollector> {
     match stats.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+fn calculate_ramp_up_step_count(target_workers: usize, ramp_up_step: usize) -> usize {
+    if target_workers == 0 {
+        return 0;
+    }
+
+    ((target_workers - 1) / ramp_up_step) + 1
+}
+
+fn calculate_ramp_up_step_interval(
+    target_workers: usize,
+    ramp_up_duration: Duration,
+    ramp_up_step: usize,
+) -> Duration {
+    let step_count = calculate_ramp_up_step_count(target_workers, ramp_up_step).max(1);
+
+    ramp_up_duration.div_f64(step_count as f64)
 }
 
 fn error_category(kind: HttpErrorKind) -> ErrorCategory {
@@ -539,6 +726,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -577,6 +766,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -628,6 +819,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -719,6 +912,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -867,6 +1062,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -933,6 +1130,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -1002,6 +1201,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -1039,6 +1240,8 @@ mod tests {
                 period: crate::config::RatePeriod::Second,
             }),
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -1074,6 +1277,8 @@ mod tests {
             insecure: false,
             rate_limit: None,
             rate_limiter: None,
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -1112,6 +1317,8 @@ mod tests {
                 period: crate::config::RatePeriod::Second,
             }),
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
+            ramp_up: None,
+            ramp_up_step: 1,
         };
 
         let engine = Engine::new(config)?;
@@ -1127,5 +1334,88 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn ramp_up_step_interval_uses_one_second_for_ten_workers_over_ten_seconds() {
+        assert_eq!(
+            calculate_ramp_up_step_interval(10, Duration::from_secs(10), 1),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn ramp_up_step_interval_uses_two_point_five_seconds_for_twenty_workers_step_five() {
+        assert_eq!(
+            calculate_ramp_up_step_interval(20, Duration::from_secs(10), 5),
+            Duration::from_millis(2_500)
+        );
+    }
+
+    #[test]
+    fn ramp_up_state_progresses_by_step_after_interval() {
+        let now = Instant::now();
+        let mut state = RampUpState::new(10, Duration::from_secs(10), 2, now);
+
+        assert_eq!(state.current_workers, 2);
+        assert_eq!(state.target_workers, 10);
+        assert_eq!(state.step_interval, Duration::from_secs(2));
+
+        assert_eq!(state.advance(now + Duration::from_secs(1), 2), 0);
+        assert_eq!(state.current_workers, 2);
+
+        assert_eq!(state.advance(now + Duration::from_secs(2), 2), 2);
+        assert_eq!(state.current_workers, 4);
+
+        assert_eq!(state.advance(now + Duration::from_secs(4), 2), 2);
+        assert_eq!(state.current_workers, 6);
+    }
+
+    #[tokio::test]
+    async fn no_ramp_up_spawns_full_concurrency_immediately() -> Result<()> {
+        let config = EngineConfig::new("http://example.com", 3);
+        let engine = Engine::new(config)?;
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let progress = ProgressTracker::new(None, None, false);
+
+        let handles = engine.spawn_workers(shutdown, None, progress);
+
+        assert_eq!(handles.len(), 3);
+
+        for handle in handles {
+            handle.abort();
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_ramp_up_is_treated_as_no_ramp_up() -> Result<()> {
+        let mut config = EngineConfig::new("http://example.com", 3);
+        config.ramp_up = Some(Duration::ZERO);
+
+        let engine = Engine::new(config)?;
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let progress = ProgressTracker::new(None, None, false);
+
+        let handles = engine.spawn_workers(shutdown, None, progress);
+
+        assert_eq!(handles.len(), 3);
+
+        for handle in handles {
+            handle.abort();
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ramp_up_step_at_least_concurrency_starts_all_workers_in_single_step() {
+        let now = Instant::now();
+        let state = RampUpState::new(10, Duration::from_secs(10), 20, now);
+
+        assert_eq!(state.current_workers, 10);
+        assert_eq!(state.target_workers, 10);
+        assert_eq!(state.step_interval, Duration::from_secs(10));
     }
 }

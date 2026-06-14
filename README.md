@@ -17,6 +17,7 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - Supports GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
 - Cross-platform: Linux, macOS, Windows
 - Rate limiting with `--rate-limit` (`N/s`, `N/m`, `N/h`)
+- Ramp-up mode with `--ramp-up` and `--ramp-up-step`
 
 ## Installation
 
@@ -83,6 +84,12 @@ clank-cli https://api.example.com --rate-limit 100/s --duration 30s
 
 # Limit to 5000 requests per minute
 clank-cli https://api.example.com -r 5000/m -d 1m
+
+# Gradually ramp up from 1 worker to 10 workers over 10 seconds
+clank-cli https://api.example.com --concurrency 10 --ramp-up 10s --duration 30s
+
+# Add 5 workers per ramp-up step until reaching 20 workers
+clank-cli https://api.example.com --concurrency 20 --ramp-up 10s --ramp-up-step 5 --duration 30s
 ```
 
 ### Config file
@@ -103,7 +110,7 @@ headers:
 
 CLI arguments override config file values. Use `--config <path>` to specify a custom config file, or `--no-config` to skip it entirely.
 
-## Rate Limiting
+## Rate Limiting & Ramp-Up
 
 Use `--rate-limit` or `-r` to throttle request throughput across all workers.
 
@@ -135,6 +142,28 @@ CLI arguments override config file values, so `--rate-limit` takes priority over
 
 Rate limiting does not reduce concurrent connections. It only throttles request timing across all concurrent workers.
 
+### Ramp-Up
+
+Use `--ramp-up <DURATION>` to start the test gradually instead of spawning all workers immediately.
+
+Without ramp-up, `clank-cli` starts all workers instantly. With ramp-up enabled, workers are added step by step until the target concurrency is reached.
+
+Examples:
+
+```bash
+# Start with 1 worker, then gradually reach 10 workers over 10 seconds
+clank-cli --url http://localhost:8080 --concurrency 10 --ramp-up 10s --duration 30s
+
+# Add 5 workers per step until reaching 20 workers over 10 seconds
+clank-cli --url http://localhost:8080 --concurrency 20 --ramp-up 10s --ramp-up-step 5 --duration 30s
+```
+
+Ramp-up only controls when workers are started. It does not change the final target concurrency.
+
+If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is used, ramp-up is treated as disabled.
+
+`--ramp-up-step` controls how many workers are added per step. The default is `1`, and the value must be greater than `0`.
+
 ## CLI Reference
 
 | Flag | Short | Description | Default |
@@ -142,6 +171,8 @@ Rate limiting does not reduce concurrent connections. It only throttles request 
 | `[URL]` / `--url` | | Target URL (required) | — |
 | `-X, --method` | `-X` | HTTP method | GET |
 | `-c, --concurrency` | `-c` | Concurrent workers | 10 |
+| `--ramp-up` | | Gradually increase workers over a duration (`5s`, `1m`, `1h30m`) | disabled |
+| `--ramp-up-step` | | Workers added per ramp-up step | 1 |
 | `-r, --rate-limit` | `-r` | Limit request rate (`100/s`, `5000/m`, `10000/h`) | unlimited |
 | `-n, --requests` | `-n` | Total requests to send | until Ctrl+C |
 | `-d, --duration` | `-d` | Run duration (`5s`, `5m`, `1h30m`) | until Ctrl+C |
