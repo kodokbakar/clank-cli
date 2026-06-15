@@ -1,4 +1,4 @@
-use crate::ui::ProgressTracker;
+use crate::ui::{LiveStats, ProgressTracker};
 use std::future::Future;
 use std::sync::{
     Arc, Mutex, MutexGuard,
@@ -112,6 +112,31 @@ impl RampUpState {
 }
 
 #[derive(Clone)]
+struct RampUpProgress {
+    current_workers: Arc<AtomicUsize>,
+    target_workers: usize,
+}
+
+impl RampUpProgress {
+    fn new(initial_workers: usize, target_workers: usize) -> Self {
+        Self {
+            current_workers: Arc::new(AtomicUsize::new(initial_workers.min(target_workers))),
+            target_workers,
+        }
+    }
+
+    fn set_current_workers(&self, current_workers: usize) {
+        self.current_workers
+            .store(current_workers.min(self.target_workers), Ordering::SeqCst);
+    }
+
+    fn apply_to_live_stats(&self, stats: &mut LiveStats) {
+        stats.current_workers = Some(self.current_workers.load(Ordering::SeqCst));
+        stats.target_workers = Some(self.target_workers);
+    }
+}
+
+#[derive(Clone)]
 struct WorkerContext {
     shutdown: Arc<AtomicBool>,
     remaining_requests: Option<Arc<AtomicUsize>>,
@@ -199,6 +224,18 @@ impl Engine {
         lock_stats(self.stats.as_ref()).snapshot()
     }
 
+    fn ramp_up_progress(&self) -> Option<RampUpProgress> {
+        self.config
+            .ramp_up
+            .filter(|duration| !duration.is_zero())
+            .map(|_| {
+                RampUpProgress::new(
+                    self.config.ramp_up_step.min(self.config.concurrency),
+                    self.config.concurrency,
+                )
+            })
+    }
+
     fn reset_timer(&self) {
         let mut stats = lock_stats(self.stats.as_ref());
         stats.reset_timer();
@@ -267,14 +304,20 @@ impl Engine {
             self.rate_limit,
         );
 
+        let ramp_up_progress = self.ramp_up_progress();
+
         let handles = self.spawn_workers(
             Arc::clone(&shutdown),
             Some(Arc::clone(&remaining_requests)),
             progress.clone(),
+            ramp_up_progress.clone(),
         );
 
-        let live_stats_handle =
-            self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
+        let live_stats_handle = self.spawn_live_stats_updater(
+            Arc::clone(&shutdown),
+            progress.clone(),
+            ramp_up_progress,
+        );
 
         let interrupt_signal = wait_for_interrupt_signal();
         tokio::pin!(interrupt_signal);
@@ -326,9 +369,19 @@ impl Engine {
     {
         let shutdown = Arc::new(AtomicBool::new(false));
         let progress_ticker = progress.spawn_duration_ticker(Arc::clone(&shutdown));
-        let live_stats_handle =
-            self.spawn_live_stats_updater(Arc::clone(&shutdown), progress.clone());
-        let handles = self.spawn_workers(Arc::clone(&shutdown), None, progress.clone());
+        let ramp_up_progress = self.ramp_up_progress();
+
+        let live_stats_handle = self.spawn_live_stats_updater(
+            Arc::clone(&shutdown),
+            progress.clone(),
+            ramp_up_progress.clone(),
+        );
+        let handles = self.spawn_workers(
+            Arc::clone(&shutdown),
+            None,
+            progress.clone(),
+            ramp_up_progress,
+        );
 
         let reason = shutdown_signal.await?;
 
@@ -365,6 +418,7 @@ impl Engine {
         shutdown: Arc<AtomicBool>,
         remaining_requests: Option<Arc<AtomicUsize>>,
         progress: ProgressTracker,
+        ramp_up_progress: Option<RampUpProgress>,
     ) -> Vec<JoinHandle<()>> {
         let worker_context = WorkerContext {
             shutdown,
@@ -387,10 +441,15 @@ impl Engine {
                 Instant::now(),
             );
 
+            let ramp_up_progress = ramp_up_progress.unwrap_or_else(|| {
+                RampUpProgress::new(ramp_up_state.current_workers, ramp_up_state.target_workers)
+            });
+
             return vec![spawn_ramp_up_workers(
                 worker_context,
                 ramp_up_state,
                 self.config.ramp_up_step,
+                ramp_up_progress,
             )];
         }
 
@@ -401,6 +460,7 @@ impl Engine {
         &self,
         shutdown: Arc<AtomicBool>,
         progress: ProgressTracker,
+        ramp_up_progress: Option<RampUpProgress>,
     ) -> Option<JoinHandle<()>> {
         if !self.progress_enabled {
             return None;
@@ -436,7 +496,7 @@ impl Engine {
 
             let live_stats = {
                 let stats = lock_stats(stats.as_ref());
-                stats.live_snapshot()
+                live_snapshot_with_ramp_up(&stats, ramp_up_progress.as_ref())
             };
 
             progress.update_live_stats(&live_stats);
@@ -448,8 +508,10 @@ fn spawn_ramp_up_workers(
     worker_context: WorkerContext,
     mut ramp_up_state: RampUpState,
     ramp_up_step: usize,
+    ramp_up_progress: RampUpProgress,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        ramp_up_progress.set_current_workers(ramp_up_state.current_workers);
         let mut handles = spawn_worker_batch(ramp_up_state.current_workers, worker_context.clone());
 
         while ramp_up_state.current_workers < ramp_up_state.target_workers {
@@ -473,6 +535,7 @@ fn spawn_ramp_up_workers(
             }
 
             let added_workers = ramp_up_state.advance(Instant::now(), ramp_up_step);
+            ramp_up_progress.set_current_workers(ramp_up_state.current_workers);
 
             if added_workers > 0 {
                 handles.extend(spawn_worker_batch(added_workers, worker_context.clone()));
@@ -588,6 +651,19 @@ fn lock_stats(stats: &Mutex<StatsCollector>) -> MutexGuard<'_, StatsCollector> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+fn live_snapshot_with_ramp_up(
+    stats: &StatsCollector,
+    ramp_up_progress: Option<&RampUpProgress>,
+) -> LiveStats {
+    let mut live_stats = stats.live_snapshot();
+
+    if let Some(ramp_up_progress) = ramp_up_progress {
+        ramp_up_progress.apply_to_live_stats(&mut live_stats);
+    }
+
+    live_stats
 }
 
 fn calculate_ramp_up_step_count(target_workers: usize, ramp_up_step: usize) -> usize {
@@ -1076,7 +1152,7 @@ mod tests {
         let progress = ProgressTracker::new(None, None, false);
 
         let handle = engine
-            .spawn_live_stats_updater(Arc::clone(&shutdown), progress)
+            .spawn_live_stats_updater(Arc::clone(&shutdown), progress, None)
             .expect("live stats updater should spawn when progress is enabled");
 
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -1097,7 +1173,7 @@ mod tests {
 
         assert!(
             engine
-                .spawn_live_stats_updater(shutdown, progress)
+                .spawn_live_stats_updater(shutdown, progress, None)
                 .is_none()
         );
 
@@ -1378,7 +1454,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(true));
         let progress = ProgressTracker::new(None, None, false);
 
-        let handles = engine.spawn_workers(shutdown, None, progress);
+        let handles = engine.spawn_workers(shutdown, None, progress, None);
 
         assert_eq!(handles.len(), 3);
 
@@ -1398,7 +1474,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(true));
         let progress = ProgressTracker::new(None, None, false);
 
-        let handles = engine.spawn_workers(shutdown, None, progress);
+        let handles = engine.spawn_workers(shutdown, None, progress, None);
 
         assert_eq!(handles.len(), 3);
 
@@ -1417,5 +1493,43 @@ mod tests {
         assert_eq!(state.current_workers, 10);
         assert_eq!(state.target_workers, 10);
         assert_eq!(state.step_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn live_snapshot_with_ramp_up_includes_worker_counts() {
+        let stats = StatsCollector::new();
+        let ramp_up_progress = RampUpProgress::new(5, 20);
+
+        let live_stats = live_snapshot_with_ramp_up(&stats, Some(&ramp_up_progress));
+
+        assert_eq!(live_stats.current_workers, Some(5));
+        assert_eq!(live_stats.target_workers, Some(20));
+    }
+
+    #[test]
+    fn live_snapshot_without_ramp_up_hides_worker_counts() {
+        let stats = StatsCollector::new();
+
+        let live_stats = live_snapshot_with_ramp_up(&stats, None);
+
+        assert_eq!(live_stats.current_workers, None);
+        assert_eq!(live_stats.target_workers, None);
+    }
+
+    #[test]
+    fn ramp_up_progress_applies_worker_counts_to_live_stats() {
+        let ramp_up_progress = RampUpProgress::new(3, 10);
+        let mut stats = LiveStats::default();
+
+        ramp_up_progress.apply_to_live_stats(&mut stats);
+
+        assert_eq!(stats.current_workers, Some(3));
+        assert_eq!(stats.target_workers, Some(10));
+
+        ramp_up_progress.set_current_workers(10);
+        ramp_up_progress.apply_to_live_stats(&mut stats);
+
+        assert_eq!(stats.current_workers, Some(10));
+        assert_eq!(stats.target_workers, Some(10));
     }
 }
