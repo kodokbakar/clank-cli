@@ -483,7 +483,7 @@ impl Engine {
                 if now >= next_update {
                     let live_stats = {
                         let stats = lock_stats(stats.as_ref());
-                        stats.live_snapshot()
+                        live_snapshot_with_ramp_up(&stats, ramp_up_progress.as_ref())
                     };
 
                     progress.update_live_stats(&live_stats);
