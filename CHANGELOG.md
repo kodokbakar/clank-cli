@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-06-16
+
+### Added
+
+- Ramp-up support with `--ramp-up <DURATION>` for gradual concurrency increase.
+- Ramp-up step control with `--ramp-up-step <N>`.
+- Live stats display for current and target workers during ramp-up.
+- Integration tests for ramp-up behavior, step intervals, final worker count, short ramp-up duration, and backward compatibility without ramp-up.
+- README documentation for ramp-up usage, step interval calculation, examples, and FAQ.
+
 ## [0.2.0] - 2026-06-14
 
 ### Added
