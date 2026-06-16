@@ -66,6 +66,8 @@ enum ShutdownReason {
     Interrupted,
 }
 
+type WorkerHandle = JoinHandle<Result<()>>;
+
 #[derive(Debug, Clone, Copy)]
 struct RampUpState {
     current_workers: usize,
@@ -419,7 +421,7 @@ impl Engine {
         remaining_requests: Option<Arc<AtomicUsize>>,
         progress: ProgressTracker,
         ramp_up_progress: Option<RampUpProgress>,
-    ) -> Vec<JoinHandle<()>> {
+    ) -> Vec<WorkerHandle> {
         let worker_context = WorkerContext {
             shutdown,
             remaining_requests,
@@ -509,7 +511,7 @@ fn spawn_ramp_up_workers(
     mut ramp_up_state: RampUpState,
     ramp_up_step: usize,
     ramp_up_progress: RampUpProgress,
-) -> JoinHandle<()> {
+) -> WorkerHandle {
     tokio::spawn(async move {
         ramp_up_progress.set_current_workers(ramp_up_state.current_workers);
         let mut handles = spawn_worker_batch(ramp_up_state.current_workers, worker_context.clone());
@@ -542,15 +544,11 @@ fn spawn_ramp_up_workers(
             }
         }
 
-        for handle in handles {
-            if let Err(error) = handle.await {
-                panic!("ramp-up worker task failed: {error}");
-            }
-        }
+        join_worker_handles(handles, "ramp-up worker task failed").await
     })
 }
 
-fn spawn_worker_batch(count: usize, worker_context: WorkerContext) -> Vec<JoinHandle<()>> {
+fn spawn_worker_batch(count: usize, worker_context: WorkerContext) -> Vec<WorkerHandle> {
     let mut handles = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -560,7 +558,7 @@ fn spawn_worker_batch(count: usize, worker_context: WorkerContext) -> Vec<JoinHa
     handles
 }
 
-fn spawn_worker(worker_context: WorkerContext) -> JoinHandle<()> {
+fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
     tokio::spawn(async move {
         loop {
             if worker_context.shutdown.load(Ordering::SeqCst) {
@@ -614,6 +612,8 @@ fn spawn_worker(worker_context: WorkerContext) -> JoinHandle<()> {
 
             worker_context.progress.tick();
         }
+
+        Ok(())
     })
 }
 
@@ -735,16 +735,31 @@ fn force_quit_window() -> Duration {
     Duration::from_secs(2)
 }
 
-async fn join_worker_handles(handles: Vec<JoinHandle<()>>, context: &'static str) -> Result<()> {
+async fn join_worker_handles(handles: Vec<WorkerHandle>, context: &'static str) -> Result<()> {
     let mut task_error = None;
 
     for handle in handles {
-        if let Err(error) = handle.await.context(context)
-            && task_error.is_none()
-        {
-            task_error = Some(error);
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let error = error.context(context);
+                eprintln!("{error:#}");
+
+                if task_error.is_none() {
+                    task_error = Some(error);
+                }
+            }
+            Err(error) => {
+                let error = anyhow::Error::new(error).context(context);
+                eprintln!("{error:#}");
+
+                if task_error.is_none() {
+                    task_error = Some(error);
+                }
+            }
         }
     }
+
     if let Some(error) = task_error {
         return Err(error);
     }
@@ -1531,5 +1546,45 @@ mod tests {
 
         assert_eq!(stats.current_workers, Some(10));
         assert_eq!(stats.target_workers, Some(10));
+    }
+
+    #[tokio::test]
+    async fn join_worker_handles_returns_error_from_worker_result() {
+        let handles: Vec<WorkerHandle> = vec![tokio::spawn(async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!("worker exploded"))
+        })];
+
+        let result = join_worker_handles(handles, "test worker failed").await;
+
+        assert!(result.is_err());
+
+        let error = result.unwrap_err().to_string();
+
+        assert!(
+            error.contains("test worker failed"),
+            "expected context in error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_worker_handles_continues_after_worker_error() {
+        let completed_workers = Arc::new(AtomicUsize::new(0));
+
+        let completed_workers_for_task = Arc::clone(&completed_workers);
+
+        let handles: Vec<WorkerHandle> = vec![
+            tokio::spawn(async {
+                Err::<(), anyhow::Error>(anyhow::anyhow!("first worker failed"))
+            }),
+            tokio::spawn(async move {
+                completed_workers_for_task.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        ];
+
+        let result = join_worker_handles(handles, "test worker failed").await;
+
+        assert!(result.is_err());
+        assert_eq!(completed_workers.load(Ordering::SeqCst), 1);
     }
 }
