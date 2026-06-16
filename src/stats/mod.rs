@@ -269,6 +269,8 @@ impl StatsCollector {
             avg_latency_ms: self.avg_latency_ms(),
             min_latency_ms: self.min_latency_ms(),
             max_latency_ms: self.max_latency_ms(),
+            current_workers: None,
+            target_workers: None,
         }
     }
 

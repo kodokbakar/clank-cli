@@ -59,6 +59,12 @@ struct Cli {
     #[arg(short, long, value_parser = parse_duration_arg)]
     duration: Option<Duration>,
 
+    #[arg(long = "ramp-up", value_name = "DURATION", value_parser = parse_ramp_up_arg)]
+    ramp_up: Option<Duration>,
+
+    #[arg(long = "ramp-up-step", value_name = "STEP", default_value_t = 1)]
+    ramp_up_step: usize,
+
     #[arg(long)]
     timeout_secs: Option<u64>,
 
@@ -94,6 +100,10 @@ async fn main() -> Result<()> {
         bail!("--stats-interval-ms must be greater than 0");
     }
 
+    if cli.ramp_up_step == 0 {
+        bail!("--ramp-up-step must be greater than 0");
+    }
+
     let file_config = load_config(&cli)?;
 
     let url = resolve_url(&cli, file_config.as_ref())?;
@@ -105,6 +115,8 @@ async fn main() -> Result<()> {
     let insecure = resolve_insecure(&cli, file_config.as_ref());
     let output_format = resolve_output_format(&cli, file_config.as_ref())?;
     let rate_limit = resolve_rate_limit(&cli, file_config.as_ref());
+    let ramp_up = resolve_ramp_up(&cli);
+    let ramp_up_step = resolve_ramp_up_step(&cli);
     let rate_limiter = rate_limit
         .map(RateLimiter::from_config)
         .transpose()?
@@ -126,6 +138,8 @@ async fn main() -> Result<()> {
         insecure,
         rate_limit,
         rate_limiter,
+        ramp_up,
+        ramp_up_step,
     };
 
     let progress_enabled = !cli.quiet;
@@ -336,7 +350,25 @@ fn resolve_rate_limit(cli: &Cli, config: Option<&ClankConfig>) -> Option<RateLim
         .or_else(|| config.and_then(|config| config.rate_limit))
 }
 
+fn resolve_ramp_up(cli: &Cli) -> Option<Duration> {
+    cli.ramp_up.filter(|duration| !duration.is_zero())
+}
+
+fn resolve_ramp_up_step(cli: &Cli) -> usize {
+    cli.ramp_up_step
+}
+
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
+    parse_duration(value).map_err(|error| error.to_string())
+}
+
+fn parse_ramp_up_arg(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+
+    if matches!(value, "0" | "0s" | "0m" | "0h") {
+        return Ok(Duration::ZERO);
+    }
+
     parse_duration(value).map_err(|error| error.to_string())
 }
 
@@ -375,6 +407,8 @@ mod tests {
             rate_limit: None,
             requests: None,
             duration: None,
+            ramp_up: None,
+            ramp_up_step: 1,
             timeout_secs: None,
             output: None,
             insecure: false,
@@ -815,5 +849,69 @@ mod tests {
     #[test]
     fn parse_rate_limit_arg_rejects_invalid_format() {
         assert!(parse_rate_limit_arg("10/d").is_err());
+    }
+
+    #[test]
+    fn resolve_ramp_up_uses_none_when_cli_missing() {
+        assert_eq!(resolve_ramp_up(&cli()), None);
+    }
+
+    #[test]
+    fn resolve_ramp_up_uses_cli_value() {
+        let mut cli = cli();
+        cli.ramp_up = Some(Duration::from_secs(10));
+
+        assert_eq!(resolve_ramp_up(&cli), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn resolve_ramp_up_treats_zero_as_none() {
+        let mut cli = cli();
+        cli.ramp_up = Some(Duration::ZERO);
+
+        assert_eq!(resolve_ramp_up(&cli), None);
+    }
+
+    #[test]
+    fn resolve_ramp_up_step_defaults_to_one() {
+        assert_eq!(resolve_ramp_up_step(&cli()), 1);
+    }
+
+    #[test]
+    fn resolve_ramp_up_step_uses_cli_value() {
+        let mut cli = cli();
+        cli.ramp_up_step = 5;
+
+        assert_eq!(resolve_ramp_up_step(&cli), 5);
+    }
+
+    #[test]
+    fn parse_ramp_up_arg_accepts_regular_duration() -> Result<()> {
+        assert_eq!(
+            parse_ramp_up_arg("10s").map_err(anyhow::Error::msg)?,
+            Duration::from_secs(10)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ramp_up_arg_accepts_zero_as_disabled() -> Result<()> {
+        assert_eq!(
+            parse_ramp_up_arg("0s").map_err(anyhow::Error::msg)?,
+            Duration::ZERO
+        );
+
+        assert_eq!(
+            parse_ramp_up_arg("0").map_err(anyhow::Error::msg)?,
+            Duration::ZERO
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ramp_up_arg_rejects_invalid_duration() {
+        assert!(parse_ramp_up_arg("10d").is_err());
     }
 }
