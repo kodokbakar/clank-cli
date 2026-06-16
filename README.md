@@ -90,6 +90,16 @@ clank-cli https://api.example.com --concurrency 10 --ramp-up 10s --duration 30s
 
 # Add 5 workers per ramp-up step until reaching 20 workers
 clank-cli https://api.example.com --concurrency 20 --ramp-up 10s --ramp-up-step 5 --duration 30s
+
+# Rate limit with ramp-up to avoid cold-start burst
+clank-cli https://api.example.com \
+  --concurrency 20 \
+  --ramp-up 10s \
+  --rate-limit 100/s \
+  --duration 30s
+
+# Rapid ramp-up for a quick test
+clank-cli https://api.example.com --concurrency 50 --ramp-up 5s --duration 30s
 ```
 
 ### Config file
@@ -110,7 +120,7 @@ headers:
 
 CLI arguments override config file values. Use `--config <path>` to specify a custom config file, or `--no-config` to skip it entirely.
 
-## Rate Limiting & Ramp-Up
+## Rate Limiting
 
 Use `--rate-limit` or `-r` to throttle request throughput across all workers.
 
@@ -142,23 +152,58 @@ CLI arguments override config file values, so `--rate-limit` takes priority over
 
 Rate limiting does not reduce concurrent connections. It only throttles request timing across all concurrent workers.
 
-### Ramp-Up
+## Ramp-Up
 
-Use `--ramp-up <DURATION>` to start the test gradually instead of spawning all workers immediately.
+Use `--ramp-up <DURATION>` to increase concurrency gradually instead of starting all workers at once.
 
-Without ramp-up, `clank-cli` starts all workers instantly. With ramp-up enabled, workers are added step by step until the target concurrency is reached.
+Ramp-up is useful when you want a more realistic load test. Real users usually do not arrive at the exact same millisecond, so starting all workers instantly can create an artificial burst at the beginning of the test. That burst can overwhelm a target server before the steady-state load is reached.
+
+Without ramp-up, `clank-cli` starts all workers immediately. This is still the default behavior and remains backward compatible.
+
+Use ramp-up when:
+
+* You want traffic to grow gradually.
+* You are testing warm-up behavior.
+* You want to avoid a burst in the first second.
+* You are combining high concurrency with rate limiting.
+
+Skip ramp-up when:
+
+* You intentionally want an instant burst test.
+* You are doing a very small local smoke test.
+* You only care about maximum immediate pressure.
 
 Examples:
 
 ```bash
-# Start with 1 worker, then gradually reach 10 workers over 10 seconds
-clank-cli --url http://localhost:8080 --concurrency 10 --ramp-up 10s --duration 30s
+# Gradually increase to 10 workers over 10 seconds
+clank-cli http://localhost:8080 -c 10 --ramp-up 10s
 
-# Add 5 workers per step until reaching 20 workers over 10 seconds
-clank-cli --url http://localhost:8080 --concurrency 20 --ramp-up 10s --ramp-up-step 5 --duration 30s
+# Add 5 workers per step until reaching 20 workers
+clank-cli http://localhost:8080 -c 20 --ramp-up 10s --ramp-up-step 5
+
+# Rapid ramp-up for a quick test
+clank-cli http://localhost:8080 -c 50 --ramp-up 5s
+
+# Combine ramp-up with rate limiting
+clank-cli http://localhost:8080 -c 20 --ramp-up 10s --rate-limit 100/s --duration 30s
 ```
 
 Ramp-up only controls when workers are started. It does not change the final target concurrency.
+
+The step interval is calculated as:
+
+```text
+ramp_up_duration / ceil(concurrency / ramp_up_step)
+```
+
+Examples:
+
+| Command                                | Step behavior                                          |
+| -------------------------------------- | ------------------------------------------------------ |
+| `-c 10 --ramp-up 10s`                  | 10 steps, 1 worker per step, 1 second between steps    |
+| `-c 20 --ramp-up 10s --ramp-up-step 5` | 4 steps, 5 workers per step, 2.5 seconds between steps |
+| `-c 50 --ramp-up 5s --ramp-up-step 10` | 5 steps, 10 workers per step, 1 second between steps   |
 
 If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is used, ramp-up is treated as disabled.
 
@@ -171,8 +216,8 @@ If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is u
 | `[URL]` / `--url` | | Target URL (required) | — |
 | `-X, --method` | `-X` | HTTP method | GET |
 | `-c, --concurrency` | `-c` | Concurrent workers | 10 |
-| `--ramp-up` | | Gradually increase workers over a duration (`5s`, `1m`, `1h30m`) | disabled |
-| `--ramp-up-step` | | Workers added per ramp-up step | 1 |
+| `--ramp-up <DURATION>` | | Ramp-up duration (`10s`, `1m`, `1h30m`) | disabled |
+| `--ramp-up-step <N>` | | Workers added per ramp-up step, for example `5` | 1 |
 | `-r, --rate-limit` | `-r` | Limit request rate (`100/s`, `5000/m`, `10000/h`) | unlimited |
 | `-n, --requests` | `-n` | Total requests to send | until Ctrl+C |
 | `-d, --duration` | `-d` | Run duration (`5s`, `5m`, `1h30m`) | until Ctrl+C |
@@ -253,6 +298,30 @@ Duration:          10.00s
 ```
 total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
 1234,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
+```
+
+## FAQ
+
+### Why should I use ramp-up?
+
+Use ramp-up when you want to avoid an artificial burst at the beginning of a load test. It helps simulate traffic that grows gradually, such as users joining over time.
+
+Without ramp-up, all workers start immediately. That is useful for burst testing, but it can be less realistic for normal traffic simulation.
+
+### How should I choose the ramp-up step size?
+
+Use a smaller step size for smoother ramp-up and a larger step size for faster ramp-up.
+
+For example:
+
+- `--ramp-up-step 1` adds workers one by one.
+- `--ramp-up-step 5` adds 5 workers per step.
+- `--ramp-up-step 10` is useful for high-concurrency tests where one-by-one ramp-up would be too slow.
+
+The step interval is based on:
+
+```text
+ramp_up_duration / ceil(concurrency / ramp_up_step)
 ```
 
 ## Build from Source
