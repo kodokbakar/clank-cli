@@ -65,6 +65,17 @@ struct Cli {
     #[arg(long = "ramp-up-step", value_name = "STEP", default_value_t = 1)]
     ramp_up_step: usize,
 
+    #[arg(long = "retry", default_value_t = 0)]
+    retry: usize,
+
+    #[arg(
+    long = "retry-delay",
+    value_name = "DURATION",
+    value_parser = parse_retry_delay_arg,
+    default_value = "0ms"
+)]
+    retry_delay: Duration,
+
     #[arg(long)]
     timeout_secs: Option<u64>,
 
@@ -124,6 +135,8 @@ async fn main() -> Result<()> {
     let ramp_up = resolve_ramp_up(&cli);
     let ramp_up_step = resolve_ramp_up_step(&cli);
     let keep_alive = resolve_keep_alive(&cli);
+    let retry = resolve_retry(&cli);
+    let retry_delay = resolve_retry_delay(&cli);
     let rate_limiter = rate_limit
         .map(RateLimiter::from_config)
         .transpose()?
@@ -148,6 +161,8 @@ async fn main() -> Result<()> {
         ramp_up,
         ramp_up_step,
         keep_alive,
+        retry,
+        retry_delay,
     };
 
     let progress_enabled = !cli.quiet;
@@ -370,6 +385,14 @@ fn resolve_keep_alive(cli: &Cli) -> bool {
     cli.keep_alive || !cli.no_keep_alive
 }
 
+fn resolve_retry(cli: &Cli) -> usize {
+    cli.retry
+}
+
+fn resolve_retry_delay(cli: &Cli) -> Duration {
+    cli.retry_delay
+}
+
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
 }
@@ -378,6 +401,16 @@ fn parse_ramp_up_arg(value: &str) -> Result<Duration, String> {
     let value = value.trim();
 
     if matches!(value, "0" | "0s" | "0m" | "0h") {
+        return Ok(Duration::ZERO);
+    }
+
+    parse_duration(value).map_err(|error| error.to_string())
+}
+
+fn parse_retry_delay_arg(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+
+    if matches!(value, "0" | "0ms" | "0s" | "0m" | "0h") {
         return Ok(Duration::ZERO);
     }
 
@@ -421,6 +454,8 @@ mod tests {
             duration: None,
             ramp_up: None,
             ramp_up_step: 1,
+            retry: 0,
+            retry_delay: Duration::ZERO,
             timeout_secs: None,
             output: None,
             insecure: false,
@@ -918,6 +953,67 @@ mod tests {
         cli.no_keep_alive = true;
 
         assert!(!resolve_keep_alive(&cli));
+    }
+
+    #[test]
+    fn resolve_retry_defaults_to_zero() {
+        assert_eq!(resolve_retry(&cli()), 0);
+    }
+
+    #[test]
+    fn resolve_retry_uses_cli_value() {
+        let mut cli = cli();
+        cli.retry = 3;
+
+        assert_eq!(resolve_retry(&cli), 3);
+    }
+
+    #[test]
+    fn resolve_retry_delay_defaults_to_zero() {
+        assert_eq!(resolve_retry_delay(&cli()), Duration::ZERO);
+    }
+
+    #[test]
+    fn resolve_retry_delay_uses_cli_value() {
+        let mut cli = cli();
+        cli.retry_delay = Duration::from_millis(100);
+
+        assert_eq!(resolve_retry_delay(&cli), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn parse_retry_delay_arg_accepts_milliseconds() -> Result<()> {
+        assert_eq!(
+            parse_retry_delay_arg("100ms").map_err(anyhow::Error::msg)?,
+            Duration::from_millis(100)
+        );
+
+        assert_eq!(
+            parse_retry_delay_arg("500ms").map_err(anyhow::Error::msg)?,
+            Duration::from_millis(500)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_retry_delay_arg_accepts_zero() -> Result<()> {
+        assert_eq!(
+            parse_retry_delay_arg("0ms").map_err(anyhow::Error::msg)?,
+            Duration::ZERO
+        );
+
+        assert_eq!(
+            parse_retry_delay_arg("0").map_err(anyhow::Error::msg)?,
+            Duration::ZERO
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_retry_delay_arg_rejects_invalid_duration() {
+        assert!(parse_retry_delay_arg("10d").is_err());
     }
 
     #[test]

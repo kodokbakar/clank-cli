@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::config::RateLimitConfig;
-use crate::engine::http_client::{HttpClient, HttpErrorKind};
+use crate::engine::http_client::{HttpClient, HttpErrorKind, RetryConfig};
 use crate::engine::rate_limiter::RateLimiter;
 use crate::stats::{ErrorCategory, StatsCollector, StatsSnapshot};
 
@@ -29,6 +29,8 @@ pub struct EngineConfig {
     pub ramp_up: Option<Duration>,
     pub ramp_up_step: usize,
     pub keep_alive: bool,
+    pub retry: usize,
+    pub retry_delay: Duration,
 }
 
 impl EngineConfig {
@@ -46,6 +48,8 @@ impl EngineConfig {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         }
     }
 }
@@ -150,6 +154,7 @@ struct WorkerContext {
     url: String,
     body: Option<String>,
     headers: Vec<(String, String)>,
+    retry_config: RetryConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
     progress: ProgressTracker,
 }
@@ -433,6 +438,10 @@ impl Engine {
             url: self.config.url.clone(),
             body: self.config.body.clone(),
             headers: self.config.headers.clone(),
+            retry_config: RetryConfig {
+                max_retries: self.config.retry,
+                delay: self.config.retry_delay,
+            },
             rate_limiter: self.rate_limiter.as_ref().map(Arc::clone),
             progress,
         };
@@ -596,6 +605,7 @@ fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
                     &worker_context.url,
                     worker_context.body.clone(),
                     &worker_context.headers,
+                    worker_context.retry_config,
                 )
                 .await;
 
@@ -822,6 +832,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -863,6 +875,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -917,6 +931,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1011,6 +1027,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1162,6 +1180,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -1231,6 +1251,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1303,6 +1325,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1343,6 +1367,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1381,6 +1407,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1422,6 +1450,8 @@ mod tests {
             ramp_up: None,
             ramp_up_step: 1,
             keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1617,5 +1647,13 @@ mod tests {
         assert!(!engine.client.keep_alive());
 
         Ok(())
+    }
+
+    #[test]
+    fn engine_config_defaults_to_retry_disabled() {
+        let config = EngineConfig::new("http://example.com", 1);
+
+        assert_eq!(config.retry, 0);
+        assert_eq!(config.retry_delay, Duration::ZERO);
     }
 }

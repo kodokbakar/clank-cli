@@ -20,6 +20,34 @@ pub struct HttpResponse {
     pub headers: HeaderMap,
     pub body: String,
     pub latency: Duration,
+    pub retry_stats: RetryStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryConfig {
+    pub max_retries: usize,
+    pub delay: Duration,
+}
+
+impl RetryConfig {
+    pub fn disabled() -> Self {
+        Self {
+            max_retries: 0,
+            delay: Duration::ZERO,
+        }
+    }
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetryStats {
+    pub total_attempts: usize,
+    pub retried: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +63,7 @@ pub enum HttpErrorKind {
 pub struct HttpClientError {
     kind: HttpErrorKind,
     message: String,
+    retry_stats: RetryStats,
 }
 
 impl HttpClientError {
@@ -42,11 +71,21 @@ impl HttpClientError {
         Self {
             kind,
             message: message.into(),
+            retry_stats: RetryStats::default(),
         }
     }
 
     pub fn kind(&self) -> HttpErrorKind {
         self.kind
+    }
+
+    pub fn retry_stats(&self) -> RetryStats {
+        self.retry_stats
+    }
+
+    fn with_retry_stats(mut self, retry_stats: RetryStats) -> Self {
+        self.retry_stats = retry_stats;
+        self
     }
 }
 
@@ -83,10 +122,72 @@ impl HttpClient {
         url: &str,
         body: Option<String>,
         headers: &[(String, String)],
+        retry_config: RetryConfig,
     ) -> std::result::Result<HttpResponse, HttpClientError> {
         let normalized_method = method.to_ascii_uppercase();
+        let started_at = Instant::now();
+        let max_attempts = retry_config.max_retries.saturating_add(1);
+        let mut total_attempts = 0;
 
-        let request = match normalized_method.as_str() {
+        loop {
+            total_attempts += 1;
+
+            let request = self.build_request(&normalized_method, url, body.clone(), headers)?;
+
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = classify_reqwest_error(error);
+
+                    if should_retry_error(error.kind()) && total_attempts < max_attempts {
+                        sleep_before_retry(retry_config.delay).await;
+                        continue;
+                    }
+
+                    return Err(error.with_retry_stats(retry_stats(total_attempts)));
+                }
+            };
+
+            let status = response.status();
+            let response_headers = response.headers().clone();
+
+            let response_body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    let error = classify_reqwest_error(error);
+
+                    if should_retry_error(error.kind()) && total_attempts < max_attempts {
+                        sleep_before_retry(retry_config.delay).await;
+                        continue;
+                    }
+
+                    return Err(error.with_retry_stats(retry_stats(total_attempts)));
+                }
+            };
+
+            if status.is_server_error() && total_attempts < max_attempts {
+                sleep_before_retry(retry_config.delay).await;
+                continue;
+            }
+
+            return Ok(HttpResponse {
+                status,
+                headers: response_headers,
+                body: response_body,
+                latency: started_at.elapsed(),
+                retry_stats: retry_stats(total_attempts),
+            });
+        }
+    }
+
+    fn build_request(
+        &self,
+        normalized_method: &str,
+        url: &str,
+        body: Option<String>,
+        headers: &[(String, String)],
+    ) -> std::result::Result<reqwest::RequestBuilder, HttpClientError> {
+        let request = match normalized_method {
             "GET" => self.client.get(url),
             "POST" => self.client.post(url),
             "PUT" => self.client.put(url),
@@ -111,25 +212,24 @@ impl HttpClient {
             }
         };
 
-        let request = apply_headers(request, headers)?;
+        apply_headers(request, headers)
+    }
+}
 
-        let started_at = Instant::now();
+fn retry_stats(total_attempts: usize) -> RetryStats {
+    RetryStats {
+        total_attempts,
+        retried: total_attempts > 1,
+    }
+}
 
-        let response = request.send().await.map_err(classify_reqwest_error)?;
+fn should_retry_error(kind: HttpErrorKind) -> bool {
+    matches!(kind, HttpErrorKind::Connection | HttpErrorKind::Timeout)
+}
 
-        let status = response.status();
-        let headers = response.headers().clone();
-
-        let body = response.text().await.map_err(classify_reqwest_error)?;
-
-        let latency = started_at.elapsed();
-
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-            latency,
-        })
+async fn sleep_before_retry(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -180,8 +280,211 @@ fn classify_reqwest_error(error: reqwest::Error) -> HttpClientError {
 mod tests {
     use super::*;
 
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use anyhow::Result;
     use httpmock::prelude::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn start_retry_status_server(statuses: Vec<u16>) -> Result<(String, Arc<AtomicUsize>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let statuses = Arc::new(statuses);
+
+        let attempts_for_task = Arc::clone(&attempts);
+        let statuses_for_task = Arc::clone(&statuses);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _peer)) = listener.accept().await else {
+                    break;
+                };
+
+                let attempts = Arc::clone(&attempts_for_task);
+                let statuses = Arc::clone(&statuses_for_task);
+
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 1024];
+                    let _ = socket.read(&mut buffer).await;
+
+                    let attempt_index = attempts.fetch_add(1, Ordering::SeqCst);
+                    let status = statuses
+                        .get(attempt_index)
+                        .copied()
+                        .or_else(|| statuses.last().copied())
+                        .unwrap_or(200);
+
+                    let reason = match status {
+                        200 => "OK",
+                        400 => "Bad Request",
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        502 => "Bad Gateway",
+                        503 => "Service Unavailable",
+                        _ => "OK",
+                    };
+
+                    let body = if status == 200 { "ok" } else { "error" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((format!("http://{address}/flaky"), attempts))
+    }
+
+    #[tokio::test]
+    async fn send_retries_503_until_final_200() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![503, 200]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        let response = client
+            .send(
+                "GET",
+                &url,
+                None,
+                &[],
+                RetryConfig {
+                    max_retries: 3,
+                    delay: Duration::ZERO,
+                },
+            )
+            .await?;
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, "ok");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            response.retry_stats,
+            RetryStats {
+                total_attempts: 2,
+                retried: true,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_returns_final_503_after_retry_exhausted() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![503, 503, 503]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        let response = client
+            .send(
+                "GET",
+                &url,
+                None,
+                &[],
+                RetryConfig {
+                    max_retries: 2,
+                    delay: Duration::ZERO,
+                },
+            )
+            .await?;
+
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            response.retry_stats,
+            RetryStats {
+                total_attempts: 3,
+                retried: true,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_does_not_retry_4xx() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![404, 200]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        let response = client
+            .send(
+                "GET",
+                &url,
+                None,
+                &[],
+                RetryConfig {
+                    max_retries: 3,
+                    delay: Duration::ZERO,
+                },
+            )
+            .await?;
+
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            response.retry_stats,
+            RetryStats {
+                total_attempts: 1,
+                retried: false,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_respects_retry_delay() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![503, 200]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+        let started_at = Instant::now();
+
+        let response = client
+            .send(
+                "GET",
+                &url,
+                None,
+                &[],
+                RetryConfig {
+                    max_retries: 1,
+                    delay: Duration::from_millis(75),
+                },
+            )
+            .await?;
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(started_at.elapsed() >= Duration::from_millis(75));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_retry_zero_keeps_backward_compatible_single_attempt() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![503, 200]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        let response = client
+            .send("GET", &url, None, &[], RetryConfig::disabled())
+            .await?;
+
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            response.retry_stats,
+            RetryStats {
+                total_attempts: 1,
+                retried: false,
+            }
+        );
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn send_get_returns_status_headers_body_and_latency() -> Result<()> {
@@ -197,7 +500,15 @@ mod tests {
             .await;
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
-        let result = client.send("GET", &server.url("/get"), None, &[]).await?;
+        let result = client
+            .send(
+                "GET",
+                &server.url("/get"),
+                None,
+                &[],
+                RetryConfig::disabled(),
+            )
+            .await?;
 
         assert_eq!(result.status, StatusCode::OK);
         assert!(result.headers.contains_key("content-type"));
@@ -221,7 +532,13 @@ mod tests {
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
-            .send("GET", &server.url("/get-no-body"), None, &[])
+            .send(
+                "GET",
+                &server.url("/get-no-body"),
+                None,
+                &[],
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::OK);
@@ -244,7 +561,13 @@ mod tests {
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
-            .send("POST", &server.url("/post"), Some("hello".to_string()), &[])
+            .send(
+                "POST",
+                &server.url("/post"),
+                Some("hello".to_string()),
+                &[],
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::CREATED);
@@ -268,7 +591,13 @@ mod tests {
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
-            .send("PUT", &server.url("/put"), Some("updated".to_string()), &[])
+            .send(
+                "PUT",
+                &server.url("/put"),
+                Some("updated".to_string()),
+                &[],
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::OK);
@@ -291,7 +620,13 @@ mod tests {
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
-            .send("PUT", &server.url("/put-no-body"), None, &[])
+            .send(
+                "PUT",
+                &server.url("/put-no-body"),
+                None,
+                &[],
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::OK);
@@ -314,7 +649,13 @@ mod tests {
 
         let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
-            .send("DELETE", &server.url("/delete"), None, &[])
+            .send(
+                "DELETE",
+                &server.url("/delete"),
+                None,
+                &[],
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::NO_CONTENT);
@@ -341,6 +682,7 @@ mod tests {
                 &server.url("/patch"),
                 Some("patched".to_string()),
                 &[],
+                RetryConfig::disabled(),
             )
             .await?;
 
@@ -369,6 +711,7 @@ mod tests {
                 &server.url("/head"),
                 Some("this-body-must-not-be-sent".to_string()),
                 &[],
+                RetryConfig::disabled(),
             )
             .await?;
 
@@ -399,6 +742,7 @@ mod tests {
                 &server.url("/options"),
                 Some("cors-preflight".to_string()),
                 &[],
+                RetryConfig::disabled(),
             )
             .await?;
 
@@ -429,7 +773,13 @@ mod tests {
         ];
 
         let result = client
-            .send("GET", &server.url("/headers"), None, &headers)
+            .send(
+                "GET",
+                &server.url("/headers"),
+                None,
+                &headers,
+                RetryConfig::disabled(),
+            )
             .await?;
 
         assert_eq!(result.status, StatusCode::OK);
@@ -448,6 +798,7 @@ mod tests {
                 "http://example.test",
                 Some("hello".to_string()),
                 &[],
+                RetryConfig::disabled(),
             )
             .await;
 
