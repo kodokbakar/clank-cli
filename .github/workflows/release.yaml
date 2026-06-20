@@ -122,14 +122,16 @@ jobs:
       - name: Extract release notes
         shell: bash
         run: |
-          awk '
-            /^## \[0\.2\.0\]/ { capture = 1; next }
+          version="${GITHUB_REF_NAME#v}"
+
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\] - " { capture = 1; next }
             /^## \[/ && capture { exit }
             capture { print }
           ' CHANGELOG.md > release-notes.md
 
           if [ ! -s release-notes.md ]; then
-            echo "Failed to extract v0.2.0 release notes from CHANGELOG.md" >&2
+            echo "Failed to extract v${version} release notes from CHANGELOG.md" >&2
             exit 1
           fi
 
@@ -145,6 +147,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: v0.2.0 — Rate Limiting
+          name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: dist/*
