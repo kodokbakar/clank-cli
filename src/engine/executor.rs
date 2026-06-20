@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::config::RateLimitConfig;
-use crate::engine::http_client::{HttpClient, HttpErrorKind};
+use crate::engine::http_client::{HttpClient, HttpErrorKind, RetryConfig};
 use crate::engine::rate_limiter::RateLimiter;
 use crate::stats::{ErrorCategory, StatsCollector, StatsSnapshot};
 
@@ -28,6 +28,9 @@ pub struct EngineConfig {
     pub rate_limiter: Option<Arc<RateLimiter>>,
     pub ramp_up: Option<Duration>,
     pub ramp_up_step: usize,
+    pub keep_alive: bool,
+    pub retry: usize,
+    pub retry_delay: Duration,
 }
 
 impl EngineConfig {
@@ -44,6 +47,9 @@ impl EngineConfig {
             rate_limit: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         }
     }
 }
@@ -148,6 +154,7 @@ struct WorkerContext {
     url: String,
     body: Option<String>,
     headers: Vec<(String, String)>,
+    retry_config: RetryConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
     progress: ProgressTracker,
 }
@@ -200,7 +207,7 @@ impl Engine {
             bail!("live stats interval must be greater than 0");
         }
 
-        let client = HttpClient::new(config.timeout, config.insecure)?;
+        let client = HttpClient::new(config.timeout, config.insecure, config.keep_alive)?;
 
         let rate_limiter = config.rate_limiter.as_ref().map(Arc::clone);
 
@@ -431,6 +438,10 @@ impl Engine {
             url: self.config.url.clone(),
             body: self.config.body.clone(),
             headers: self.config.headers.clone(),
+            retry_config: RetryConfig {
+                max_retries: self.config.retry,
+                delay: self.config.retry_delay,
+            },
             rate_limiter: self.rate_limiter.as_ref().map(Arc::clone),
             progress,
         };
@@ -594,19 +605,23 @@ fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
                     &worker_context.url,
                     worker_context.body.clone(),
                     &worker_context.headers,
+                    worker_context.retry_config,
                 )
                 .await;
 
             match result {
                 Ok(response) => {
+                    let retries = retry_count(response.retry_stats.total_attempts);
                     let mut stats = lock_stats(worker_context.stats.as_ref());
-                    stats.record(response.latency, response.status.as_u16());
+
+                    stats.record_with_retries(response.latency, response.status.as_u16(), retries);
                 }
                 Err(error) => {
                     let category = error_category(error.kind());
+                    let retries = retry_count(error.retry_stats().total_attempts);
                     let mut stats = lock_stats(worker_context.stats.as_ref());
 
-                    stats.record_error(category, error);
+                    stats.record_error_with_retries(category, error, retries);
                 }
             }
 
@@ -692,6 +707,10 @@ fn error_category(kind: HttpErrorKind) -> ErrorCategory {
             ErrorCategory::Other
         }
     }
+}
+
+fn retry_count(total_attempts: usize) -> usize {
+    total_attempts.saturating_sub(1)
 }
 
 async fn acquire_rate_limit(rate_limiter: &RateLimiter, shutdown: &AtomicBool) -> bool {
@@ -819,6 +838,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -859,6 +881,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -912,6 +937,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1005,6 +1033,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1155,6 +1186,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -1223,6 +1257,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1294,6 +1331,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1333,6 +1373,9 @@ mod tests {
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1370,6 +1413,9 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1410,6 +1456,9 @@ mod tests {
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
+            retry: 0,
+            retry_delay: Duration::ZERO,
         };
 
         let engine = Engine::new(config)?;
@@ -1586,5 +1635,59 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(completed_workers.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn engine_config_defaults_to_keep_alive() {
+        let config = EngineConfig::new("http://example.com", 1);
+
+        assert!(config.keep_alive);
+    }
+
+    #[test]
+    fn engine_accepts_no_keep_alive_config() -> Result<()> {
+        let mut config = EngineConfig::new("http://example.com", 1);
+        config.keep_alive = false;
+
+        let engine = Engine::new(config)?;
+
+        assert!(!engine.client.keep_alive());
+
+        Ok(())
+    }
+
+    #[test]
+    fn engine_config_defaults_to_retry_disabled() {
+        let config = EngineConfig::new("http://example.com", 1);
+
+        assert_eq!(config.retry, 0);
+        assert_eq!(config.retry_delay, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_records_retry_count_from_5xx_retry() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let failing = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/flaky");
+                then.status(503).body("service unavailable");
+            })
+            .await;
+
+        let mut config = EngineConfig::new(server.url("/flaky"), 1);
+        config.retry = 2;
+        config.retry_delay = Duration::ZERO;
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_requests(1).await?;
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.error_counts.http_5xx, 1);
+        assert_eq!(snapshot.retries, 2);
+        assert_eq!(failing.calls_async().await, 3);
+
+        Ok(())
     }
 }

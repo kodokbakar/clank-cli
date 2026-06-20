@@ -9,6 +9,7 @@ pub struct LiveStats {
     pub total_requests: u64,
     pub successful: u64,
     pub errors: u64,
+    pub retries: usize,
     pub current_rps: f64,
     pub avg_latency_ms: f64,
     pub min_latency_ms: f64,
@@ -40,6 +41,7 @@ impl LiveStats {
             total_requests,
             successful,
             errors,
+            retries: 0,
             current_rps,
             avg_latency_ms,
             min_latency_ms,
@@ -57,6 +59,7 @@ impl Default for LiveStats {
             total_requests: 0,
             successful: 0,
             errors: 0,
+            retries: 0,
             current_rps: 0.0,
             avg_latency_ms: 0.0,
             min_latency_ms: 0.0,
@@ -96,13 +99,16 @@ pub fn format_live_with_color(stats: &LiveStats, color_enabled: bool) -> String 
         color_enabled,
     );
 
-    format!(
-        "{} req | {} | {} | {}",
-        format_number(stats.total_requests),
-        rps,
-        avg,
-        errors
-    )
+    let mut parts = vec![format!("{} req", format_number(stats.total_requests)), rps];
+
+    if stats.retries > 0 {
+        parts.push(format!("{} retries", format_number(stats.retries as u64)));
+    }
+
+    parts.push(avg);
+    parts.push(errors);
+
+    parts.join(" | ")
 }
 
 pub fn format_ramp_up_live(stats: &LiveStats) -> Option<String> {
@@ -167,6 +173,10 @@ pub fn format_live_with_rate_limit_and_color(
     );
 
     let mut parts = vec![format!("{} req", format_number(stats.total_requests)), rps];
+
+    if stats.retries > 0 {
+        parts.push(format!("{} retries", format_number(stats.retries as u64)));
+    }
 
     if let Some(ramp_up) = format_ramp_up_live(stats) {
         parts.push(maybe_color(&ramp_up, ramp_up_color(stats), color_enabled));
@@ -363,6 +373,29 @@ mod tests {
         assert_eq!(
             output,
             "123 req | 12.3 req/s | Rate Limit: unlimited | avg 45.2ms | 0 errors"
+        );
+    }
+
+    #[test]
+    fn format_live_hides_zero_retries() {
+        let stats = LiveStats::calculate(Duration::from_secs(10), 100, 80, 20, 45.0, 10.0, 90.0);
+
+        let output = format_live(&stats);
+
+        assert!(!output.contains("retries"));
+    }
+
+    #[test]
+    fn format_live_includes_retries_when_present() {
+        let mut stats =
+            LiveStats::calculate(Duration::from_secs(10), 100, 80, 20, 45.0, 10.0, 90.0);
+        stats.retries = 3;
+
+        let output = format_live(&stats);
+
+        assert_eq!(
+            output,
+            "100 req | 10.0 req/s | 3 retries | avg 45.0ms | 20 errors"
         );
     }
 }

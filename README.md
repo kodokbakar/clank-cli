@@ -1,6 +1,7 @@
 # clank-cli
 
 [![CI](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml/badge.svg)](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml)
+[![crates.io](https://img.shields.io/crates/v/clank-cli.svg)](https://crates.io/crates/clank-cli)
 
 HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 
@@ -18,6 +19,9 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - Cross-platform: Linux, macOS, Windows
 - Rate limiting with `--rate-limit` (`N/s`, `N/m`, `N/h`)
 - Ramp-up mode with `--ramp-up` and `--ramp-up-step`
+- Retry support with `--retry` and `--retry-delay`
+- Keep-alive control with `--keep-alive` and `--no-keep-alive`
+- Retry stats in plain text, JSON, and CSV output
 
 ## Installation
 
@@ -100,6 +104,21 @@ clank-cli https://api.example.com \
 
 # Rapid ramp-up for a quick test
 clank-cli https://api.example.com --concurrency 50 --ramp-up 5s --duration 30s
+
+# Retry transient 5xx, connection, or timeout errors
+clank-cli https://api.example.com --retry 3 --retry-delay 100ms --duration 30s
+
+# Disable keep-alive to benchmark cold connections
+clank-cli https://api.example.com --no-keep-alive -n 100
+
+# Retry + rate limiting + ramp-up
+clank-cli https://api.example.com \
+  --concurrency 20 \
+  --ramp-up 10s \
+  --rate-limit 100/s \
+  --retry 3 \
+  --retry-delay 100ms \
+  --duration 30s
 ```
 
 ### Config file
@@ -209,6 +228,83 @@ If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is u
 
 `--ramp-up-step` controls how many workers are added per step. The default is `1`, and the value must be greater than `0`.
 
+## Retry
+
+Use `--retry <N>` to retry failed requests when the failure is likely transient.
+
+Retry is useful when:
+
+* The target server occasionally returns HTTP 5xx.
+* A connection fails temporarily.
+* A request times out under load.
+* You want to measure how often the target recovers after transient failures.
+
+Examples:
+
+```bash
+# Retry failed requests up to 3 times
+clank-cli http://localhost:8080 --retry 3
+
+# Retry with 100ms delay between attempts
+clank-cli http://localhost:8080 --retry 3 --retry-delay 100ms
+
+# Combine retry with rate limiting and ramp-up
+clank-cli http://localhost:8080 \
+  --concurrency 20 \
+  --ramp-up 10s \
+  --rate-limit 100/s \
+  --retry 3 \
+  --retry-delay 100ms \
+  --duration 30s
+```
+
+Retry behavior:
+
+| Failure type                          | Retried? |
+| ------------------------------------- | -------- |
+| HTTP 5xx                              | Yes      |
+| Connection error                      | Yes      |
+| Timeout                               | Yes      |
+| HTTP 4xx                              | No       |
+| Invalid request or unsupported method | No       |
+
+`--retry 3` means one initial attempt plus up to 3 retry attempts. The default is `--retry 0`, so retry is disabled unless explicitly configured.
+
+`--retry-delay <DURATION>` controls the delay between retry attempts. The default is `0ms`.
+
+Retry counts are included in plain text, JSON, CSV, and live terminal stats.
+
+## Keep-alive
+
+By default, `clank-cli` uses HTTP keep-alive so connections can be reused across multiple requests. This is usually the best default because it matches common production client behavior and avoids paying TCP/TLS connection setup cost for every request.
+
+Use `--no-keep-alive` when you intentionally want every request to use a fresh connection.
+
+Examples:
+
+```bash
+# Default behavior: reuse connections
+clank-cli http://localhost:8080 --keep-alive -n 100
+
+# Disable connection reuse
+clank-cli http://localhost:8080 --no-keep-alive -n 100
+```
+
+Use keep-alive when:
+
+* You want realistic API client behavior.
+* You are benchmarking steady-state request handling.
+* You want to reduce connection setup overhead.
+
+Use `--no-keep-alive` when:
+
+* You want to benchmark cold connection behavior.
+* You want to stress connection accept/close handling.
+* You want to compare reused connections vs fresh connections.
+
+`--keep-alive` is the default. `--no-keep-alive` disables connection reuse.
+
+
 ## CLI Reference
 
 | Flag | Short | Description | Default |
@@ -218,6 +314,8 @@ If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is u
 | `-c, --concurrency` | `-c` | Concurrent workers | 10 |
 | `--ramp-up <DURATION>` | | Ramp-up duration (`10s`, `1m`, `1h30m`) | disabled |
 | `--ramp-up-step <N>` | | Workers added per ramp-up step, for example `5` | 1 |
+| `--retry <N>` | | Retry failed requests up to N times | 0 |
+| `--retry-delay <DURATION>` | | Delay between retry attempts (`100ms`, `1s`, `500ms`) | 0ms |
 | `-r, --rate-limit` | `-r` | Limit request rate (`100/s`, `5000/m`, `10000/h`) | unlimited |
 | `-n, --requests` | `-n` | Total requests to send | until Ctrl+C |
 | `-d, --duration` | `-d` | Run duration (`5s`, `5m`, `1h30m`) | until Ctrl+C |
@@ -230,6 +328,7 @@ If `--ramp-up` is omitted, all workers start immediately. If `--ramp-up 0s` is u
 | `-f, --config` | `-f` | Config file path | `clank.yaml` |
 | `--no-config` | | Skip config file | false |
 | `-k, --insecure` | `-k` | Skip TLS verification | false |
+| `--keep-alive` / `--no-keep-alive` | | Control HTTP connection reuse | keep-alive |
 | `-q, --quiet` | `-q` | Disable progress bar | false |
 | `--no-color` | | Disable colored output | false |
 | `--stats-interval-ms` | | Live stats update interval (ms) | 1000 |
@@ -246,6 +345,7 @@ Results:
 Total Requests:    1,234
 Successful:        1,200 (97.2%)
 Errors:            34 (2.8%)
+Retries:           12
   Timeout:         12
   Connection:      8
   HTTP 4xx:        14
@@ -269,6 +369,7 @@ Duration:          10.00s
 ```json
 {
   "total_requests": 1234,
+  "retries": 12,
   "successful": 1200,
   "errors": 34,
   "error_rate": 2.8,
@@ -296,8 +397,8 @@ Duration:          10.00s
 ### CSV (`-o csv`)
 
 ```
-total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
-1234,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
+total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
+1234,12,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
 ```
 
 ## FAQ
@@ -323,6 +424,18 @@ The step interval is based on:
 ```text
 ramp_up_duration / ceil(concurrency / ramp_up_step)
 ```
+
+### When should I enable retry?
+
+Enable retry when you want to tolerate transient server-side failures during a load test.
+
+Retry is best for HTTP 5xx, connection failures, and timeouts. It is not used for HTTP 4xx responses because 4xx usually means the request itself is invalid or unauthorized.
+
+### When should I disable keep-alive?
+
+Disable keep-alive when you want to benchmark cold connection behavior.
+
+For most API load tests, keep-alive should remain enabled because that is closer to normal production client behavior.
 
 ## Build from Source
 

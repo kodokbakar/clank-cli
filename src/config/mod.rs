@@ -154,7 +154,7 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
     }
 
     let mut chars = input.chars().peekable();
-    let mut total_secs = 0u64;
+    let mut total = Duration::ZERO;
     let mut has_component = false;
 
     while chars.peek().is_some() {
@@ -177,33 +177,45 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
             .parse()
             .with_context(|| format!("invalid duration number: {number}"))?;
 
-        let unit = chars
-            .next()
-            .with_context(|| format!("missing duration unit in: {input}"))?;
+        let mut unit = String::new();
 
-        let multiplier = match unit {
-            's' => 1,
-            'm' => 60,
-            'h' => 60 * 60,
+        while let Some(char) = chars.peek() {
+            if char.is_ascii_alphabetic() {
+                unit.push(*char);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        if unit.is_empty() {
+            bail!("missing duration unit in: {input}");
+        }
+
+        let component = match unit.as_str() {
+            "ms" => Duration::from_millis(value),
+            "s" => Duration::from_secs(value),
+            "m" => Duration::from_secs(value.checked_mul(60).context("duration is too large")?),
+            "h" => Duration::from_secs(
+                value
+                    .checked_mul(60 * 60)
+                    .context("duration is too large")?,
+            ),
             _ => bail!("unsupported duration unit: {unit}"),
         };
 
-        let component_secs = value
-            .checked_mul(multiplier)
-            .context("duration is too large")?;
-
-        total_secs = total_secs
-            .checked_add(component_secs)
+        total = total
+            .checked_add(component)
             .context("duration is too large")?;
 
         has_component = true;
     }
 
-    if !has_component || total_secs == 0 {
+    if !has_component || total.is_zero() {
         bail!("duration must be greater than 0");
     }
 
-    Ok(Duration::from_secs(total_secs))
+    Ok(total)
 }
 
 pub fn validate_method(method: &str) -> Result<String> {
@@ -285,6 +297,15 @@ mod tests {
     fn parse_duration_supports_composite_duration() -> Result<()> {
         assert_eq!(parse_duration("1h30m")?, Duration::from_secs(5400));
         assert_eq!(parse_duration("1h30m5s")?, Duration::from_secs(5405));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_duration_supports_milliseconds() -> Result<()> {
+        assert_eq!(parse_duration("100ms")?, Duration::from_millis(100));
+        assert_eq!(parse_duration("500ms")?, Duration::from_millis(500));
+        assert_eq!(parse_duration("1s500ms")?, Duration::from_millis(1_500));
 
         Ok(())
     }
