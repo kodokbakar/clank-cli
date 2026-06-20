@@ -642,8 +642,9 @@ fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
                             retries,
                         );
                     } else {
-                        stats.record_error_with_retries(
-                            ErrorCategory::Other,
+                        stats.record_validation_error_with_retries(
+                            response.latency,
+                            response.status.as_u16(),
                             validation_result.failures.join("; "),
                             retries,
                         );
