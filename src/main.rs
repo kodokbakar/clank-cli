@@ -69,11 +69,11 @@ struct Cli {
     retry: usize,
 
     #[arg(
-    long = "retry-delay",
-    value_name = "DURATION",
-    value_parser = parse_retry_delay_arg,
-    default_value = "0ms"
-)]
+        long = "retry-delay",
+        value_name = "DURATION",
+        value_parser = parse_retry_delay_arg,
+        default_value = "0ms"
+    )]
     retry_delay: Duration,
 
     #[arg(long)]
@@ -135,8 +135,8 @@ async fn main() -> Result<()> {
     let ramp_up = resolve_ramp_up(&cli);
     let ramp_up_step = resolve_ramp_up_step(&cli);
     let keep_alive = resolve_keep_alive(&cli);
-    let retry = resolve_retry(&cli);
-    let retry_delay = resolve_retry_delay(&cli);
+    let retry = cli.retry;
+    let retry_delay = cli.retry_delay;
     let rate_limiter = rate_limit
         .map(RateLimiter::from_config)
         .transpose()?
@@ -383,14 +383,6 @@ fn resolve_ramp_up_step(cli: &Cli) -> usize {
 
 fn resolve_keep_alive(cli: &Cli) -> bool {
     cli.keep_alive || !cli.no_keep_alive
-}
-
-fn resolve_retry(cli: &Cli) -> usize {
-    cli.retry
-}
-
-fn resolve_retry_delay(cli: &Cli) -> Duration {
-    cli.retry_delay
 }
 
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
@@ -953,32 +945,6 @@ mod tests {
         cli.no_keep_alive = true;
 
         assert!(!resolve_keep_alive(&cli));
-    }
-
-    #[test]
-    fn resolve_retry_defaults_to_zero() {
-        assert_eq!(resolve_retry(&cli()), 0);
-    }
-
-    #[test]
-    fn resolve_retry_uses_cli_value() {
-        let mut cli = cli();
-        cli.retry = 3;
-
-        assert_eq!(resolve_retry(&cli), 3);
-    }
-
-    #[test]
-    fn resolve_retry_delay_defaults_to_zero() {
-        assert_eq!(resolve_retry_delay(&cli()), Duration::ZERO);
-    }
-
-    #[test]
-    fn resolve_retry_delay_uses_cli_value() {
-        let mut cli = cli();
-        cli.retry_delay = Duration::from_millis(100);
-
-        assert_eq!(resolve_retry_delay(&cli), Duration::from_millis(100));
     }
 
     #[test]

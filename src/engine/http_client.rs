@@ -125,12 +125,12 @@ impl HttpClient {
         retry_config: RetryConfig,
     ) -> std::result::Result<HttpResponse, HttpClientError> {
         let normalized_method = method.to_ascii_uppercase();
-        let started_at = Instant::now();
         let max_attempts = retry_config.max_retries.saturating_add(1);
         let mut total_attempts = 0;
 
         loop {
             total_attempts += 1;
+            let attempt_started_at = Instant::now();
 
             let request = self.build_request(&normalized_method, url, body.clone(), headers)?;
 
@@ -174,7 +174,7 @@ impl HttpClient {
                 status,
                 headers: response_headers,
                 body: response_body,
-                latency: started_at.elapsed(),
+                latency: attempt_started_at.elapsed(),
                 retry_stats: retry_stats(total_attempts),
             });
         }
@@ -460,6 +460,35 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(started_at.elapsed() >= Duration::from_millis(75));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_retry_latency_excludes_retry_delay() -> Result<()> {
+        let (url, attempts) = start_retry_status_server(vec![503, 200]).await?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        let response = client
+            .send(
+                "GET",
+                &url,
+                None,
+                &[],
+                RetryConfig {
+                    max_retries: 1,
+                    delay: Duration::from_millis(150),
+                },
+            )
+            .await?;
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            response.latency < Duration::from_millis(150),
+            "final-attempt latency should not include retry delay, got {:?}",
+            response.latency
+        );
 
         Ok(())
     }
