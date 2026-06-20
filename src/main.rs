@@ -74,6 +74,12 @@ struct Cli {
     #[arg(short = 'k', long)]
     insecure: bool,
 
+    #[arg(long = "keep-alive", action = ArgAction::SetTrue, conflicts_with = "no_keep_alive")]
+    keep_alive: bool,
+
+    #[arg(long = "no-keep-alive", action = ArgAction::SetTrue)]
+    no_keep_alive: bool,
+
     #[arg(short, long)]
     quiet: bool,
 
@@ -117,6 +123,7 @@ async fn main() -> Result<()> {
     let rate_limit = resolve_rate_limit(&cli, file_config.as_ref());
     let ramp_up = resolve_ramp_up(&cli);
     let ramp_up_step = resolve_ramp_up_step(&cli);
+    let keep_alive = resolve_keep_alive(&cli);
     let rate_limiter = rate_limit
         .map(RateLimiter::from_config)
         .transpose()?
@@ -140,6 +147,7 @@ async fn main() -> Result<()> {
         rate_limiter,
         ramp_up,
         ramp_up_step,
+        keep_alive,
     };
 
     let progress_enabled = !cli.quiet;
@@ -358,6 +366,10 @@ fn resolve_ramp_up_step(cli: &Cli) -> usize {
     cli.ramp_up_step
 }
 
+fn resolve_keep_alive(cli: &Cli) -> bool {
+    cli.keep_alive || !cli.no_keep_alive
+}
+
 fn parse_duration_arg(value: &str) -> Result<Duration, String> {
     parse_duration(value).map_err(|error| error.to_string())
 }
@@ -412,6 +424,8 @@ mod tests {
             timeout_secs: None,
             output: None,
             insecure: false,
+            keep_alive: false,
+            no_keep_alive: false,
             quiet: false,
             stats_interval_ms: 1_000,
             no_color: false,
@@ -883,6 +897,27 @@ mod tests {
         cli.ramp_up_step = 5;
 
         assert_eq!(resolve_ramp_up_step(&cli), 5);
+    }
+
+    #[test]
+    fn resolve_keep_alive_defaults_to_true() {
+        assert!(resolve_keep_alive(&cli()));
+    }
+
+    #[test]
+    fn resolve_keep_alive_uses_explicit_keep_alive() {
+        let mut cli = cli();
+        cli.keep_alive = true;
+
+        assert!(resolve_keep_alive(&cli));
+    }
+
+    #[test]
+    fn resolve_keep_alive_uses_no_keep_alive() {
+        let mut cli = cli();
+        cli.no_keep_alive = true;
+
+        assert!(!resolve_keep_alive(&cli));
     }
 
     #[test]

@@ -112,6 +112,7 @@ fn engine_config(url: String, concurrency: usize) -> EngineConfig {
         rate_limiter: None,
         ramp_up: None,
         ramp_up_step: 1,
+        keep_alive: true,
     }
 }
 

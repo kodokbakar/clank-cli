@@ -28,6 +28,7 @@ pub struct EngineConfig {
     pub rate_limiter: Option<Arc<RateLimiter>>,
     pub ramp_up: Option<Duration>,
     pub ramp_up_step: usize,
+    pub keep_alive: bool,
 }
 
 impl EngineConfig {
@@ -44,6 +45,7 @@ impl EngineConfig {
             rate_limit: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         }
     }
 }
@@ -200,7 +202,7 @@ impl Engine {
             bail!("live stats interval must be greater than 0");
         }
 
-        let client = HttpClient::new(config.timeout, config.insecure)?;
+        let client = HttpClient::new(config.timeout, config.insecure, config.keep_alive)?;
 
         let rate_limiter = config.rate_limiter.as_ref().map(Arc::clone);
 
@@ -819,6 +821,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -859,6 +862,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -912,6 +916,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1005,6 +1010,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1155,6 +1161,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new_with_progress_and_live_stats_interval(
@@ -1223,6 +1230,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1294,6 +1302,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1333,6 +1342,7 @@ mod tests {
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1370,6 +1380,7 @@ mod tests {
             rate_limiter: None,
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1410,6 +1421,7 @@ mod tests {
             rate_limiter: Some(Arc::new(RateLimiter::new(10, Duration::from_secs(1))?)),
             ramp_up: None,
             ramp_up_step: 1,
+            keep_alive: true,
         };
 
         let engine = Engine::new(config)?;
@@ -1586,5 +1598,24 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(completed_workers.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn engine_config_defaults_to_keep_alive() {
+        let config = EngineConfig::new("http://example.com", 1);
+
+        assert!(config.keep_alive);
+    }
+
+    #[test]
+    fn engine_accepts_no_keep_alive_config() -> Result<()> {
+        let mut config = EngineConfig::new("http://example.com", 1);
+        config.keep_alive = false;
+
+        let engine = Engine::new(config)?;
+
+        assert!(!engine.client.keep_alive());
+
+        Ok(())
     }
 }

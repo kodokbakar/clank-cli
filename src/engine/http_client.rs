@@ -11,6 +11,7 @@ use reqwest::{
 #[derive(Debug, Clone)]
 pub struct HttpClient {
     client: Client,
+    keep_alive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,14 +59,22 @@ impl fmt::Display for HttpClientError {
 impl Error for HttpClientError {}
 
 impl HttpClient {
-    pub fn new(timeout: Duration, insecure: bool) -> Result<Self> {
-        let client = Client::builder()
+    pub fn new(timeout: Duration, insecure: bool, keep_alive: bool) -> Result<Self> {
+        let mut builder = Client::builder()
             .timeout(timeout)
-            .danger_accept_invalid_certs(insecure)
-            .build()
-            .context("failed to build HTTP client")?;
+            .danger_accept_invalid_certs(insecure);
 
-        Ok(Self { client })
+        if !keep_alive {
+            builder = builder.pool_max_idle_per_host(0);
+        }
+
+        let client = builder.build().context("failed to build HTTP client")?;
+
+        Ok(Self { client, keep_alive })
+    }
+
+    pub fn keep_alive(&self) -> bool {
+        self.keep_alive
     }
 
     pub async fn send(
@@ -187,7 +196,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client.send("GET", &server.url("/get"), None, &[]).await?;
 
         assert_eq!(result.status, StatusCode::OK);
@@ -210,7 +219,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send("GET", &server.url("/get-no-body"), None, &[])
             .await?;
@@ -233,7 +242,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send("POST", &server.url("/post"), Some("hello".to_string()), &[])
             .await?;
@@ -257,7 +266,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send("PUT", &server.url("/put"), Some("updated".to_string()), &[])
             .await?;
@@ -280,7 +289,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send("PUT", &server.url("/put-no-body"), None, &[])
             .await?;
@@ -303,7 +312,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send("DELETE", &server.url("/delete"), None, &[])
             .await?;
@@ -325,7 +334,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send(
                 "PATCH",
@@ -353,7 +362,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send(
                 "HEAD",
@@ -383,7 +392,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let result = client
             .send(
                 "OPTIONS",
@@ -413,7 +422,7 @@ mod tests {
             })
             .await;
 
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
         let headers = vec![
             ("Authorization".to_string(), "Bearer token123".to_string()),
             ("Content-Type".to_string(), "application/json".to_string()),
@@ -431,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_method_returns_error() -> Result<()> {
-        let client = HttpClient::new(Duration::from_secs(10), false)?;
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
 
         let result = client
             .send(
@@ -454,9 +463,27 @@ mod tests {
 
     #[test]
     fn new_accepts_insecure_flag() -> Result<()> {
-        let client = HttpClient::new(Duration::from_secs(10), true);
+        let client = HttpClient::new(Duration::from_secs(10), true, true);
 
         assert!(client.is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn new_defaults_to_keep_alive_when_enabled() -> Result<()> {
+        let client = HttpClient::new(Duration::from_secs(10), false, true)?;
+
+        assert!(client.keep_alive());
+
+        Ok(())
+    }
+
+    #[test]
+    fn new_accepts_no_keep_alive() -> Result<()> {
+        let client = HttpClient::new(Duration::from_secs(10), false, false)?;
+
+        assert!(!client.keep_alive());
 
         Ok(())
     }
