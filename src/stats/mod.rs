@@ -113,6 +113,7 @@ pub struct StatsCollector {
     total_requests: u64,
     successful_requests: u64,
     total_errors: u64,
+    retries: usize,
     error_counts: ErrorCounts,
     status_codes: BTreeMap<u16, u64>,
     histogram: HdrHistogram,
@@ -123,6 +124,7 @@ pub struct StatsCollector {
 pub struct StatsSnapshot {
     pub duration: Duration,
     pub total_requests: u64,
+    pub retries: usize,
     pub successful_requests: u64,
     pub total_errors: u64,
     pub error_counts: ErrorCounts,
@@ -137,6 +139,7 @@ pub struct StatsSnapshot {
 #[derive(Debug, Serialize)]
 struct SummaryJson {
     total_requests: u64,
+    retries: usize,
     successful: u64,
     errors: u64,
     error_rate: f64,
@@ -173,6 +176,7 @@ impl Default for StatsCollector {
             total_requests: 0,
             successful_requests: 0,
             total_errors: 0,
+            retries: 0,
             error_counts: ErrorCounts::default(),
             status_codes: BTreeMap::new(),
             histogram: HdrHistogram::new(),
@@ -191,7 +195,12 @@ impl StatsCollector {
     }
 
     pub fn record(&mut self, latency: Duration, status_code: u16) {
+        self.record_with_retries(latency, status_code, 0);
+    }
+
+    pub fn record_with_retries(&mut self, latency: Duration, status_code: u16, retries: usize) {
         self.total_requests += 1;
+        self.retries = self.retries.saturating_add(retries);
         self.histogram.record(latency);
 
         let count = self.status_codes.entry(status_code).or_insert(0);
@@ -211,8 +220,18 @@ impl StatsCollector {
     }
 
     pub fn record_error(&mut self, category: ErrorCategory, error: impl ToString) {
+        self.record_error_with_retries(category, error, 0);
+    }
+
+    pub fn record_error_with_retries(
+        &mut self,
+        category: ErrorCategory,
+        error: impl ToString,
+        retries: usize,
+    ) {
         self.total_requests += 1;
         self.total_errors += 1;
+        self.retries = self.retries.saturating_add(retries);
 
         match category {
             ErrorCategory::Timeout => self.error_counts.timeout += 1,
@@ -247,6 +266,7 @@ impl StatsCollector {
         StatsSnapshot {
             duration,
             total_requests: self.total_requests,
+            retries: self.retries,
             successful_requests: self.successful_requests,
             total_errors: self.total_errors,
             error_counts: self.error_counts.clone(),
@@ -265,6 +285,7 @@ impl StatsCollector {
             total_requests: self.total_requests,
             successful: self.successful_requests,
             errors: self.total_errors,
+            retries: self.retries,
             current_rps: self.current_rps(),
             avg_latency_ms: self.avg_latency_ms(),
             min_latency_ms: self.min_latency_ms(),
@@ -388,6 +409,15 @@ fn format_summary_text_with_rate_limit_and_color(
         color_enabled,
     );
 
+    let retries_line = if snapshot.retries > 0 {
+        format!(
+            "\nRetries:           {}",
+            format_number(snapshot.retries as u64)
+        )
+    } else {
+        String::new()
+    };
+
     let timeout_count = maybe_color(
         &format_number(snapshot.error_counts.timeout),
         count_error_color(snapshot.error_counts.timeout),
@@ -442,7 +472,7 @@ Results:
 ────────────────────────────────
 Total Requests:    {total_requests_line}
 Successful:        {successful_line}
-Errors:            {errors_line}
+Errors:            {errors_line}{retries_line}
   Timeout:         {timeout_count}
   Connection:      {connection_count}
   HTTP 4xx:        {http_4xx_count}
@@ -473,6 +503,7 @@ fn format_summary_json_with_rate_limit(
 ) -> String {
     let summary = SummaryJson {
         total_requests: snapshot.total_requests,
+        retries: snapshot.retries,
         successful: snapshot.successful_requests,
         errors: snapshot.total_errors,
         error_rate: percentage(snapshot.total_errors, snapshot.total_requests),
@@ -509,8 +540,9 @@ fn format_summary_csv_with_rate_limit(
     rate_limit: Option<&RateLimitConfig>,
 ) -> String {
     format!(
-        "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other\n{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.2},{},{},{},{},{},{}",
+        "total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other\n{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.2},{},{},{},{},{},{}",
         snapshot.total_requests,
+        snapshot.retries,
         snapshot.successful_requests,
         snapshot.total_errors,
         percentage(snapshot.total_errors, snapshot.total_requests),
@@ -620,6 +652,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output)?;
 
         assert_eq!(value["total_requests"], 100);
+        assert_eq!(value["retries"], 0);
         assert_eq!(value["successful"], 80);
         assert_eq!(value["errors"], 20);
         assert_eq!(value["error_breakdown"]["timeout"], 10);
@@ -642,6 +675,19 @@ mod tests {
     }
 
     #[test]
+    fn format_summary_json_outputs_retries_field() -> serde_json::Result<()> {
+        let mut snapshot = summary_snapshot();
+        snapshot.retries = 3;
+
+        let output = format_summary_json(&snapshot);
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+
+        assert_eq!(value["retries"], 3);
+
+        Ok(())
+    }
+
+    #[test]
     fn format_summary_csv_outputs_header_and_one_row() {
         let snapshot = summary_snapshot();
         let output = format_summary_csv(&snapshot);
@@ -650,23 +696,24 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            "total_requests,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
+            "total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
         );
 
         let columns = lines[1].split(',').collect::<Vec<_>>();
 
-        assert_eq!(columns.len(), 18);
+        assert_eq!(columns.len(), 19);
         assert_eq!(columns[0], "100");
-        assert_eq!(columns[1], "80");
-        assert_eq!(columns[2], "20");
-        assert_eq!(columns[3], "20.0");
-        assert_eq!(columns[10], "unlimited");
-        assert_eq!(columns[12], "10");
-        assert_eq!(columns[13], "0");
-        assert_eq!(columns[14], "10");
-        assert_eq!(columns[15], "0");
+        assert_eq!(columns[1], "0");
+        assert_eq!(columns[2], "80");
+        assert_eq!(columns[3], "20");
+        assert_eq!(columns[4], "20.0");
+        assert_eq!(columns[11], "unlimited");
+        assert_eq!(columns[13], "10");
+        assert_eq!(columns[14], "0");
+        assert_eq!(columns[15], "10");
         assert_eq!(columns[16], "0");
         assert_eq!(columns[17], "0");
+        assert_eq!(columns[18], "0");
     }
 
     #[test]
@@ -676,6 +723,39 @@ mod tests {
         let lines = output.lines().collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn format_summary_csv_outputs_retries_column() {
+        let mut snapshot = summary_snapshot();
+        snapshot.retries = 3;
+
+        let output = format_summary_csv(&snapshot);
+        let lines = output.lines().collect::<Vec<_>>();
+        let columns = lines[1].split(',').collect::<Vec<_>>();
+
+        assert!(lines[0].starts_with("total_requests,retries,"));
+        assert_eq!(columns[1], "3");
+    }
+
+    #[test]
+    fn format_summary_text_hides_zero_retries() {
+        let snapshot = summary_snapshot();
+
+        let output = format_summary_text(&snapshot);
+
+        assert!(!output.contains("Retries:"));
+    }
+
+    #[test]
+    fn format_summary_text_includes_retries_when_present() {
+        let mut snapshot = summary_snapshot();
+        snapshot.retries = 3;
+
+        let output = format_summary_text(&snapshot);
+
+        assert!(output.contains("Retries:"));
+        assert!(output.contains("3"));
     }
 
     #[test]
@@ -741,6 +821,7 @@ mod tests {
         let snapshot = StatsSnapshot {
             duration: Duration::from_secs(10),
             total_requests: 100,
+            retries: 0,
             successful_requests: 80,
             total_errors: 20,
             error_counts: ErrorCounts {
@@ -799,6 +880,22 @@ mod tests {
         assert_eq!(snapshot.error_counts.http_other, 0);
         assert_eq!(snapshot.status_codes.get(&503), Some(&1));
         assert_eq!(snapshot.histogram.len(), 1);
+    }
+
+    #[test]
+    fn record_with_retries_accumulates_retry_count() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_with_retries(Duration::from_millis(10), 200, 2);
+        stats.record_with_retries(Duration::from_millis(20), 503, 1);
+        stats.record_error_with_retries(ErrorCategory::Connection, "connection refused", 3);
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 3);
+        assert_eq!(snapshot.retries, 6);
+        assert_eq!(snapshot.successful_requests, 1);
+        assert_eq!(snapshot.total_errors, 2);
     }
 
     #[test]

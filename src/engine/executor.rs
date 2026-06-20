@@ -611,14 +611,17 @@ fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
 
             match result {
                 Ok(response) => {
+                    let retries = retry_count(response.retry_stats.total_attempts);
                     let mut stats = lock_stats(worker_context.stats.as_ref());
-                    stats.record(response.latency, response.status.as_u16());
+
+                    stats.record_with_retries(response.latency, response.status.as_u16(), retries);
                 }
                 Err(error) => {
                     let category = error_category(error.kind());
+                    let retries = retry_count(error.retry_stats().total_attempts);
                     let mut stats = lock_stats(worker_context.stats.as_ref());
 
-                    stats.record_error(category, error);
+                    stats.record_error_with_retries(category, error, retries);
                 }
             }
 
@@ -704,6 +707,10 @@ fn error_category(kind: HttpErrorKind) -> ErrorCategory {
             ErrorCategory::Other
         }
     }
+}
+
+fn retry_count(total_attempts: usize) -> usize {
+    total_attempts.saturating_sub(1)
 }
 
 async fn acquire_rate_limit(rate_limiter: &RateLimiter, shutdown: &AtomicBool) -> bool {
@@ -1655,5 +1662,32 @@ mod tests {
 
         assert_eq!(config.retry, 0);
         assert_eq!(config.retry_delay, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn run_for_requests_records_retry_count_from_5xx_retry() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let failing = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/flaky");
+                then.status(503).body("service unavailable");
+            })
+            .await;
+
+        let mut config = EngineConfig::new(server.url("/flaky"), 1);
+        config.retry = 2;
+        config.retry_delay = Duration::ZERO;
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_requests(1).await?;
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.error_counts.http_5xx, 1);
+        assert_eq!(snapshot.retries, 2);
+        assert_eq!(failing.calls_async().await, 3);
+
+        Ok(())
     }
 }
