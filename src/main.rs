@@ -77,7 +77,7 @@ struct Cli {
     #[arg(long = "keep-alive", action = ArgAction::SetTrue, conflicts_with = "no_keep_alive")]
     keep_alive: bool,
 
-    #[arg(long = "no-keep-alive", action = ArgAction::SetTrue)]
+    #[arg(long = "no-keep-alive", action = ArgAction::SetTrue, conflicts_with = "keep_alive")]
     no_keep_alive: bool,
 
     #[arg(short, long)]
