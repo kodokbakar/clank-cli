@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-06-20
+
+### Added
+
+- Retry support with `--retry <N>` for retrying transient request failures.
+- Retry delay support with `--retry-delay <DURATION>` for controlling delay between retry attempts.
+- Keep-alive control with `--keep-alive` and `--no-keep-alive` for HTTP connection reuse behavior.
+- Retry stats in plain text, JSON, CSV, and live terminal output.
+- Integration tests for retry behavior, retry delay, retry exhaustion, 4xx no-retry behavior, keep-alive behavior, and retry with rate limiting.
+- README documentation for retry and keep-alive usage.
+
 ## [0.2.1] - 2026-06-16
 
 ### Added
