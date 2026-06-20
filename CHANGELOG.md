@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Retry stats in plain text, JSON, CSV, and live terminal output.
 - Integration tests for retry behavior, retry delay, retry exhaustion, 4xx no-retry behavior, keep-alive behavior, and retry with rate limiting.
 - README documentation for retry and keep-alive usage.
+- crates.io package metadata for `cargo install clank-cli` distribution.
 
 ## [0.2.1] - 2026-06-16
 

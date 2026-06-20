@@ -2,6 +2,13 @@
 name = "clank-cli"
 version = "0.2.2"
 edition = "2024"
+description = "HTTP load testing CLI built with Rust"
+license = "MIT"
+repository = "https://github.com/kodokbakar/clank-cli"
+homepage = "https://github.com/kodokbakar/clank-cli"
+readme = "README.md"
+keywords = ["cli", "load-testing", "http", "benchmark", "rust"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"

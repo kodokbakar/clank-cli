@@ -1,6 +1,7 @@
 # clank-cli
 
 [![CI](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml/badge.svg)](https://github.com/kodokbakar/clank-cli/actions/workflows/ci.yaml)
+[![crates.io](https://img.shields.io/crates/v/clank-cli.svg)](https://crates.io/crates/clank-cli)
 
 HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 
