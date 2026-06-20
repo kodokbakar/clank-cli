@@ -8,7 +8,7 @@ use clank_cli::config::{
     ClankConfig, DEFAULT_CONFIG_FILE, OutputFormat, RateLimitConfig, parse_duration, parse_header,
     parse_output_format, parse_rate_limit, validate_method,
 };
-use clank_cli::engine::{Engine, EngineConfig, RateLimiter};
+use clank_cli::engine::{Engine, EngineConfig, RateLimiter, ValidationConfig};
 use clank_cli::stats::format_summary_with_rate_limit_and_color_and_format;
 use clap::{ArgAction, Parser};
 use console::Term;
@@ -46,6 +46,15 @@ struct Cli {
 
     #[arg(short = 'H', long = "header", value_name = "KEY: VALUE", action = ArgAction::Append)]
     headers: Vec<String>,
+
+    #[arg(long = "expect-status", value_name = "CODE")]
+    expect_status: Option<String>,
+
+    #[arg(long = "expect-body", value_name = "PATTERN")]
+    expect_body: Option<String>,
+
+    #[arg(long = "expect-header", value_name = "KEY: VALUE", action = ArgAction::Append)]
+    expect_headers: Vec<String>,
 
     #[arg(short, long)]
     concurrency: Option<usize>,
@@ -127,6 +136,7 @@ async fn main() -> Result<()> {
     let method = resolve_method(&cli, file_config.as_ref())?;
     let body = resolve_body(&cli, file_config.as_ref())?;
     let headers = resolve_headers(&cli, file_config.as_ref())?;
+    let validation = resolve_validation(&cli)?;
     let concurrency = resolve_concurrency(&cli, file_config.as_ref());
     let timeout_secs = resolve_timeout_secs(&cli, file_config.as_ref());
     let insecure = resolve_insecure(&cli, file_config.as_ref());
@@ -153,6 +163,7 @@ async fn main() -> Result<()> {
         method,
         body,
         headers,
+        validation,
         concurrency,
         timeout: Duration::from_secs(timeout_secs),
         insecure,
@@ -274,6 +285,46 @@ fn resolve_headers(cli: &Cli, config: Option<&ClankConfig>) -> Result<Vec<(Strin
     }
 
     Ok(headers)
+}
+
+fn resolve_validation(cli: &Cli) -> Result<ValidationConfig> {
+    Ok(ValidationConfig {
+        expect_status: cli
+            .expect_status
+            .as_deref()
+            .map(parse_expect_status)
+            .transpose()?,
+        expect_body: cli.expect_body.clone(),
+        expect_headers: if cli.expect_headers.is_empty() {
+            None
+        } else {
+            Some(parse_headers(&cli.expect_headers)?)
+        },
+    })
+}
+
+fn parse_expect_status(input: &str) -> Result<Vec<u16>> {
+    let mut statuses = Vec::new();
+
+    for raw_status in input.split(',') {
+        let raw_status = raw_status.trim();
+
+        if raw_status.is_empty() {
+            bail!("expected status code cannot be empty");
+        }
+
+        let status: u16 = raw_status
+            .parse()
+            .with_context(|| format!("invalid status code: {raw_status}"))?;
+
+        if !(100..=599).contains(&status) {
+            bail!("status code must be between 100 and 599: {status}");
+        }
+
+        statuses.push(status);
+    }
+
+    Ok(statuses)
 }
 
 fn resolve_content_type<'a>(cli: &'a Cli, config: Option<&'a ClankConfig>) -> Option<&'a str> {
@@ -440,6 +491,9 @@ mod tests {
             body_file: None,
             content_type: None,
             headers: Vec::new(),
+            expect_status: None,
+            expect_body: None,
+            expect_headers: Vec::new(),
             concurrency: None,
             rate_limit: None,
             requests: None,
@@ -1010,5 +1064,52 @@ mod tests {
     #[test]
     fn parse_ramp_up_arg_rejects_invalid_duration() {
         assert!(parse_ramp_up_arg("10d").is_err());
+    }
+
+    #[test]
+    fn parse_expect_status_accepts_single_status() -> Result<()> {
+        assert_eq!(parse_expect_status("200")?, vec![200]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_expect_status_accepts_multiple_statuses() -> Result<()> {
+        assert_eq!(parse_expect_status("200,201,204")?, vec![200, 201, 204]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_expect_status_rejects_non_numeric_status() {
+        assert!(parse_expect_status("ok").is_err());
+    }
+
+    #[test]
+    fn parse_expect_status_rejects_out_of_range_status() {
+        assert!(parse_expect_status("99").is_err());
+        assert!(parse_expect_status("600").is_err());
+    }
+
+    #[test]
+    fn resolve_validation_builds_validation_config() -> Result<()> {
+        let mut cli = cli();
+        cli.expect_status = Some("200,201".to_string());
+        cli.expect_body = Some(r#""status":"ok""#.to_string());
+        cli.expect_headers = vec!["Content-Type: application/json".to_string()];
+
+        let validation = resolve_validation(&cli)?;
+
+        assert_eq!(validation.expect_status, Some(vec![200, 201]));
+        assert_eq!(validation.expect_body, Some(r#""status":"ok""#.to_string()));
+        assert_eq!(
+            validation.expect_headers,
+            Some(vec![(
+                "Content-Type".to_string(),
+                "application/json".to_string()
+            )])
+        );
+
+        Ok(())
     }
 }

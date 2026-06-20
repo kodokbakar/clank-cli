@@ -5,7 +5,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clank_cli::engine::{Engine, EngineConfig};
+use clank_cli::engine::{Engine, EngineConfig, ValidationConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -105,6 +105,7 @@ fn engine_config(url: String, concurrency: usize) -> EngineConfig {
         method: "GET".to_string(),
         body: None,
         headers: Vec::new(),
+        validation: ValidationConfig::default(),
         concurrency,
         timeout: Duration::from_secs(2),
         insecure: false,

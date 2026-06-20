@@ -7,6 +7,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use regex::Regex;
+use reqwest::header::HeaderMap;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -21,6 +23,7 @@ pub struct EngineConfig {
     pub method: String,
     pub body: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub validation: ValidationConfig,
     pub concurrency: usize,
     pub timeout: Duration,
     pub insecure: bool,
@@ -33,6 +36,19 @@ pub struct EngineConfig {
     pub retry_delay: Duration,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationConfig {
+    pub expect_status: Option<Vec<u16>>,
+    pub expect_body: Option<String>,
+    pub expect_headers: Option<Vec<(String, String)>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationResult {
+    pub passed: bool,
+    pub failures: Vec<String>,
+}
+
 impl EngineConfig {
     pub fn new(url: impl Into<String>, concurrency: usize) -> Self {
         Self {
@@ -40,6 +56,7 @@ impl EngineConfig {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency,
             timeout: Duration::from_secs(10),
             insecure: false,
@@ -154,6 +171,7 @@ struct WorkerContext {
     url: String,
     body: Option<String>,
     headers: Vec<(String, String)>,
+    validation: ValidationConfig,
     retry_config: RetryConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
     progress: ProgressTracker,
@@ -438,6 +456,7 @@ impl Engine {
             url: self.config.url.clone(),
             body: self.config.body.clone(),
             headers: self.config.headers.clone(),
+            validation: self.config.validation.clone(),
             retry_config: RetryConfig {
                 max_retries: self.config.retry,
                 delay: self.config.retry_delay,
@@ -612,9 +631,23 @@ fn spawn_worker(worker_context: WorkerContext) -> WorkerHandle {
             match result {
                 Ok(response) => {
                     let retries = retry_count(response.retry_stats.total_attempts);
+                    let validation_result =
+                        validate_response(&response, &worker_context.validation);
                     let mut stats = lock_stats(worker_context.stats.as_ref());
 
-                    stats.record_with_retries(response.latency, response.status.as_u16(), retries);
+                    if validation_result.passed {
+                        stats.record_with_retries(
+                            response.latency,
+                            response.status.as_u16(),
+                            retries,
+                        );
+                    } else {
+                        stats.record_error_with_retries(
+                            ErrorCategory::Other,
+                            validation_result.failures.join("; "),
+                            retries,
+                        );
+                    }
                 }
                 Err(error) => {
                     let category = error_category(error.kind());
@@ -707,6 +740,61 @@ fn error_category(kind: HttpErrorKind) -> ErrorCategory {
             ErrorCategory::Other
         }
     }
+}
+
+fn validate_response(
+    response: &crate::engine::http_client::HttpResponse,
+    validation: &ValidationConfig,
+) -> ValidationResult {
+    let mut failures = Vec::new();
+
+    if let Some(expected_statuses) = &validation.expect_status {
+        let actual_status = response.status.as_u16();
+
+        if !expected_statuses.contains(&actual_status) {
+            failures.push(format!(
+                "expected status {:?}, got {}",
+                expected_statuses, actual_status
+            ));
+        }
+    }
+
+    if let Some(pattern) = &validation.expect_body {
+        match Regex::new(pattern) {
+            Ok(regex) => {
+                if !regex.is_match(&response.body) {
+                    failures.push(format!("expected body to match pattern `{pattern}`"));
+                }
+            }
+            Err(error) => {
+                failures.push(format!("invalid body regex `{pattern}`: {error}"));
+            }
+        }
+    }
+
+    if let Some(expected_headers) = &validation.expect_headers {
+        for (key, expected_value) in expected_headers {
+            match header_value(&response.headers, key) {
+                Some(actual_value) if actual_value == expected_value.as_str() => {}
+                Some(actual_value) => failures.push(format!(
+                    "expected header `{key}: {expected_value}`, got `{key}: {actual_value}`"
+                )),
+                None => failures.push(format!("expected header `{key}: {expected_value}`")),
+            }
+        }
+    }
+
+    ValidationResult {
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.as_str().eq_ignore_ascii_case(key))
+        .and_then(|(_, value)| value.to_str().ok())
 }
 
 fn retry_count(total_attempts: usize) -> usize {
@@ -831,6 +919,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 10,
             timeout: Duration::from_millis(300),
             insecure: false,
@@ -874,6 +963,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -930,6 +1020,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -1026,6 +1117,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 5,
             timeout: Duration::from_millis(50),
             insecure: false,
@@ -1179,6 +1271,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 1,
             timeout: Duration::from_millis(50),
             insecure: false,
@@ -1250,6 +1343,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 5,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -1324,6 +1418,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: vec![("Authorization".to_string(), "Bearer token123".to_string())],
+            validation: ValidationConfig::default(),
             concurrency: 2,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -1363,6 +1458,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -1406,6 +1502,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 10,
             timeout: Duration::from_secs(1),
             insecure: false,
@@ -1446,6 +1543,7 @@ mod tests {
             method: "GET".to_string(),
             body: None,
             headers: Vec::new(),
+            validation: ValidationConfig::default(),
             concurrency: 5,
             timeout: Duration::from_secs(1),
             insecure: false,
