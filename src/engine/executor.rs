@@ -1788,4 +1788,36 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn run_for_requests_counts_validation_failure_as_validation_error() -> Result<()> {
+        let server = MockServer::start_async().await;
+
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/validation");
+                then.status(200).body("not-ok");
+            })
+            .await;
+
+        let mut config = EngineConfig::new(server.url("/validation"), 1);
+        config.validation = ValidationConfig {
+            expect_status: Some(vec![200]),
+            expect_body: Some("^ok$".to_string()),
+            expect_headers: None,
+        };
+
+        let engine = Engine::new(config)?;
+        let snapshot = engine.run_for_requests(1).await?;
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.validation_errors, 1);
+        assert_eq!(snapshot.error_counts.other, 0);
+        assert_eq!(snapshot.status_codes.get(&200), Some(&1));
+        assert_eq!(mock.calls_async().await, 1);
+
+        Ok(())
+    }
 }

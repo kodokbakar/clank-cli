@@ -10,6 +10,7 @@ pub struct LiveStats {
     pub successful: u64,
     pub errors: u64,
     pub retries: usize,
+    pub validation_errors: usize,
     pub current_rps: f64,
     pub avg_latency_ms: f64,
     pub min_latency_ms: f64,
@@ -42,6 +43,7 @@ impl LiveStats {
             successful,
             errors,
             retries: 0,
+            validation_errors: 0,
             current_rps,
             avg_latency_ms,
             min_latency_ms,
@@ -60,6 +62,7 @@ impl Default for LiveStats {
             successful: 0,
             errors: 0,
             retries: 0,
+            validation_errors: 0,
             current_rps: 0.0,
             avg_latency_ms: 0.0,
             min_latency_ms: 0.0,
@@ -103,6 +106,13 @@ pub fn format_live_with_color(stats: &LiveStats, color_enabled: bool) -> String 
 
     if stats.retries > 0 {
         parts.push(format!("{} retries", format_number(stats.retries as u64)));
+    }
+
+    if stats.validation_errors > 0 {
+        parts.push(format!(
+            "{} validation errors",
+            format_number(stats.validation_errors as u64)
+        ));
     }
 
     parts.push(avg);
@@ -176,6 +186,13 @@ pub fn format_live_with_rate_limit_and_color(
 
     if stats.retries > 0 {
         parts.push(format!("{} retries", format_number(stats.retries as u64)));
+    }
+
+    if stats.validation_errors > 0 {
+        parts.push(format!(
+            "{} validation errors",
+            format_number(stats.validation_errors as u64)
+        ));
     }
 
     if let Some(ramp_up) = format_ramp_up_live(stats) {
@@ -396,6 +413,34 @@ mod tests {
         assert_eq!(
             output,
             "100 req | 10.0 req/s | 3 retries | avg 45.0ms | 20 errors"
+        );
+    }
+
+    #[test]
+    fn format_live_includes_validation_errors_when_present() {
+        let mut stats =
+            LiveStats::calculate(Duration::from_secs(10), 100, 80, 20, 45.0, 10.0, 90.0);
+        stats.validation_errors = 3;
+
+        let output = format_live(&stats);
+
+        assert_eq!(
+            output,
+            "100 req | 10.0 req/s | 3 validation errors | avg 45.0ms | 20 errors"
+        );
+    }
+
+    #[test]
+    fn format_live_with_rate_limit_includes_validation_errors_when_present() {
+        let mut stats =
+            LiveStats::calculate(Duration::from_secs(10), 100, 80, 20, 45.0, 10.0, 90.0);
+        stats.validation_errors = 3;
+
+        let output = format_live_with_rate_limit_and_color(&stats, None, false);
+
+        assert_eq!(
+            output,
+            "100 req | 10.0 req/s | 3 validation errors | Rate Limit: unlimited | avg 45.0ms | 20 errors"
         );
     }
 }

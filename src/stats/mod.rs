@@ -21,6 +21,7 @@ pub enum ErrorCategory {
     Timeout,
     Connection,
     Http,
+    ValidationFailure,
     Other,
 }
 
@@ -114,6 +115,7 @@ pub struct StatsCollector {
     successful_requests: u64,
     total_errors: u64,
     retries: usize,
+    validation_errors: usize,
     error_counts: ErrorCounts,
     status_codes: BTreeMap<u16, u64>,
     histogram: HdrHistogram,
@@ -125,6 +127,7 @@ pub struct StatsSnapshot {
     pub duration: Duration,
     pub total_requests: u64,
     pub retries: usize,
+    pub validation_errors: usize,
     pub successful_requests: u64,
     pub total_errors: u64,
     pub error_counts: ErrorCounts,
@@ -139,6 +142,7 @@ pub struct StatsSnapshot {
 #[derive(Debug, Serialize)]
 struct SummaryJson {
     total_requests: u64,
+    validation_errors: usize,
     retries: usize,
     successful: u64,
     errors: u64,
@@ -177,6 +181,7 @@ impl Default for StatsCollector {
             successful_requests: 0,
             total_errors: 0,
             retries: 0,
+            validation_errors: 0,
             error_counts: ErrorCounts::default(),
             status_codes: BTreeMap::new(),
             histogram: HdrHistogram::new(),
@@ -237,8 +242,32 @@ impl StatsCollector {
             ErrorCategory::Timeout => self.error_counts.timeout += 1,
             ErrorCategory::Connection => self.error_counts.connection += 1,
             ErrorCategory::Http => self.error_counts.http_other += 1,
+            ErrorCategory::ValidationFailure => {
+                self.validation_errors = self.validation_errors.saturating_add(1);
+            }
             ErrorCategory::Other => self.error_counts.other += 1,
         }
+
+        if self.errors.len() < MAX_STORED_ERRORS {
+            self.errors.push(error.to_string());
+        }
+    }
+
+    pub fn record_validation_error_with_retries(
+        &mut self,
+        latency: Duration,
+        status_code: u16,
+        error: impl ToString,
+        retries: usize,
+    ) {
+        self.total_requests += 1;
+        self.total_errors += 1;
+        self.validation_errors = self.validation_errors.saturating_add(1);
+        self.retries = self.retries.saturating_add(retries);
+        self.histogram.record(latency);
+
+        let count = self.status_codes.entry(status_code).or_insert(0);
+        *count += 1;
 
         if self.errors.len() < MAX_STORED_ERRORS {
             self.errors.push(error.to_string());
@@ -267,6 +296,7 @@ impl StatsCollector {
             duration,
             total_requests: self.total_requests,
             retries: self.retries,
+            validation_errors: self.validation_errors,
             successful_requests: self.successful_requests,
             total_errors: self.total_errors,
             error_counts: self.error_counts.clone(),
@@ -286,6 +316,7 @@ impl StatsCollector {
             successful: self.successful_requests,
             errors: self.total_errors,
             retries: self.retries,
+            validation_errors: self.validation_errors,
             current_rps: self.current_rps(),
             avg_latency_ms: self.avg_latency_ms(),
             min_latency_ms: self.min_latency_ms(),
@@ -418,6 +449,15 @@ fn format_summary_text_with_rate_limit_and_color(
         String::new()
     };
 
+    let validation_errors_line = if snapshot.validation_errors > 0 {
+        format!(
+            "\nValidation Errors: {}",
+            format_number(snapshot.validation_errors as u64)
+        )
+    } else {
+        String::new()
+    };
+
     let timeout_count = maybe_color(
         &format_number(snapshot.error_counts.timeout),
         count_error_color(snapshot.error_counts.timeout),
@@ -472,7 +512,7 @@ Results:
 ────────────────────────────────
 Total Requests:    {total_requests_line}
 Successful:        {successful_line}
-Errors:            {errors_line}{retries_line}
+Errors:            {errors_line}{validation_errors_line}{retries_line}
   Timeout:         {timeout_count}
   Connection:      {connection_count}
   HTTP 4xx:        {http_4xx_count}
@@ -503,6 +543,7 @@ fn format_summary_json_with_rate_limit(
 ) -> String {
     let summary = SummaryJson {
         total_requests: snapshot.total_requests,
+        validation_errors: snapshot.validation_errors,
         retries: snapshot.retries,
         successful: snapshot.successful_requests,
         errors: snapshot.total_errors,
@@ -540,8 +581,9 @@ fn format_summary_csv_with_rate_limit(
     rate_limit: Option<&RateLimitConfig>,
 ) -> String {
     format!(
-        "total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other\n{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.2},{},{},{},{},{},{}",
+        "total_requests,validation_errors,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other\n{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.2},{},{},{},{},{},{}",
         snapshot.total_requests,
+        snapshot.validation_errors,
         snapshot.retries,
         snapshot.successful_requests,
         snapshot.total_errors,
@@ -696,24 +738,25 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            "total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
+            "total_requests,validation_errors,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other"
         );
 
         let columns = lines[1].split(',').collect::<Vec<_>>();
 
-        assert_eq!(columns.len(), 19);
+        assert_eq!(columns.len(), 20);
         assert_eq!(columns[0], "100");
         assert_eq!(columns[1], "0");
-        assert_eq!(columns[2], "80");
-        assert_eq!(columns[3], "20");
-        assert_eq!(columns[4], "20.0");
-        assert_eq!(columns[11], "unlimited");
-        assert_eq!(columns[13], "10");
-        assert_eq!(columns[14], "0");
-        assert_eq!(columns[15], "10");
-        assert_eq!(columns[16], "0");
+        assert_eq!(columns[2], "0");
+        assert_eq!(columns[3], "80");
+        assert_eq!(columns[4], "20");
+        assert_eq!(columns[5], "20.0");
+        assert_eq!(columns[12], "unlimited");
+        assert_eq!(columns[14], "10");
+        assert_eq!(columns[15], "0");
+        assert_eq!(columns[16], "10");
         assert_eq!(columns[17], "0");
         assert_eq!(columns[18], "0");
+        assert_eq!(columns[19], "0");
     }
 
     #[test]
@@ -734,8 +777,8 @@ mod tests {
         let lines = output.lines().collect::<Vec<_>>();
         let columns = lines[1].split(',').collect::<Vec<_>>();
 
-        assert!(lines[0].starts_with("total_requests,retries,"));
-        assert_eq!(columns[1], "3");
+        assert!(lines[0].starts_with("total_requests,validation_errors,retries,"));
+        assert_eq!(columns[2], "3");
     }
 
     #[test]
@@ -822,6 +865,7 @@ mod tests {
             duration: Duration::from_secs(10),
             total_requests: 100,
             retries: 0,
+            validation_errors: 0,
             successful_requests: 80,
             total_errors: 20,
             error_counts: ErrorCounts {
@@ -1220,5 +1264,95 @@ mod tests {
 
         assert!(output.contains("Rate Limit:"));
         assert!(output.contains("unlimited"));
+    }
+
+    #[test]
+    fn record_validation_error_tracks_validation_errors() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_validation_error_with_retries(
+            Duration::from_millis(25),
+            200,
+            "expected body to match pattern `ok`",
+            2,
+        );
+
+        let snapshot = stats.snapshot();
+
+        assert_eq!(snapshot.total_requests, 1);
+        assert_eq!(snapshot.successful_requests, 0);
+        assert_eq!(snapshot.total_errors, 1);
+        assert_eq!(snapshot.validation_errors, 1);
+        assert_eq!(snapshot.retries, 2);
+        assert_eq!(snapshot.status_codes.get(&200), Some(&1));
+        assert_eq!(snapshot.histogram.len(), 1);
+        assert_eq!(snapshot.errors.len(), 1);
+    }
+
+    #[test]
+    fn format_summary_json_outputs_validation_errors_field() -> serde_json::Result<()> {
+        let mut stats = StatsCollector::new();
+
+        stats.record_validation_error_with_retries(
+            Duration::from_millis(25),
+            200,
+            "validation failed",
+            0,
+        );
+
+        let output = format_summary_json(&stats.snapshot());
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+
+        assert_eq!(value["validation_errors"], 1);
+        assert_eq!(value["errors"], 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn format_summary_csv_outputs_validation_errors_column() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_validation_error_with_retries(
+            Duration::from_millis(25),
+            200,
+            "validation failed",
+            0,
+        );
+
+        let output = format_summary_csv(&stats.snapshot());
+        let lines = output.lines().collect::<Vec<_>>();
+        let columns = lines[1].split(',').collect::<Vec<_>>();
+
+        assert!(lines[0].starts_with("total_requests,validation_errors,"));
+        assert_eq!(columns[0], "1");
+        assert_eq!(columns[1], "1");
+        assert_eq!(columns[4], "1");
+    }
+
+    #[test]
+    fn format_summary_text_hides_zero_validation_errors() {
+        let snapshot = summary_snapshot();
+
+        let output = format_summary_text(&snapshot);
+
+        assert!(!output.contains("Validation Errors:"));
+    }
+
+    #[test]
+    fn format_summary_text_includes_validation_errors_when_present() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_validation_error_with_retries(
+            Duration::from_millis(25),
+            200,
+            "validation failed",
+            0,
+        );
+
+        let output = format_summary_text(&stats.snapshot());
+
+        assert!(output.contains("Validation Errors:"));
+        assert!(output.contains("1"));
     }
 }
