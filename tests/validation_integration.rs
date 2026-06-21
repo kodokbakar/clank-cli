@@ -415,6 +415,84 @@ async fn cli_accepts_correct_header_with_case_insensitive_key() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_counts_header_value_mismatch_as_validation_error() -> Result<()> {
+    let server = start_validation_server(vec![
+        ResponseSpec::new(200, "ok").with_header("Content-Type", "text/html"),
+    ])
+    .await?;
+
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-header", "Content-Type: application/json"],
+    ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected header"));
+    assert!(stderr.contains("Content-Type"));
+    assert!(stderr.contains("application/json"));
+    assert!(stderr.contains("text/html"));
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 0);
+    assert_eq!(output["errors"], 1);
+    assert_eq!(output["validation_errors"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_counts_missing_header_as_validation_error() -> Result<()> {
+    let server = start_validation_server(vec![ResponseSpec::new(200, "ok")]).await?;
+
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-header", "X-Custom: some-value"],
+    ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected header"));
+    assert!(stderr.contains("X-Custom"));
+    assert!(stderr.contains("some-value"));
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 0);
+    assert_eq!(output["errors"], 1);
+    assert_eq!(output["validation_errors"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_accepts_multiple_headers_all_match() -> Result<()> {
+    let server = start_validation_server(vec![
+        ResponseSpec::new(200, "ok")
+            .with_header("Content-Type", "application/json")
+            .with_header("X-Custom", "some-value"),
+    ])
+    .await?;
+
+    let output = run_clank_json(&validation_args(
+        server.url(),
+        &[
+            "--expect-header",
+            "Content-Type: application/json",
+            "--expect-header",
+            "X-Custom: some-value",
+        ],
+    ))?;
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 1);
+    assert_eq!(output["errors"], 0);
+    assert_eq!(output["validation_errors"], 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_accepts_multiple_validation_rules_together() -> Result<()> {
     let server = start_validation_server(vec![
         ResponseSpec::new(200, r#"{"status":"ok"}"#)
