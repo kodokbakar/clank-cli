@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>clank-cli Load Test Report</title>
+    <style>
+        :root {
+            --bg: #0b1020;
+            --panel: #11182d;
+            --panel-2: #151f38;
+            --text: #e5edf7;
+            --muted: #91a4bd;
+            --border: rgba(148, 163, 184, 0.22);
+            --primary: #7dd3fc;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --danger: #fb7185;
+            --shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background:
+                radial-gradient(circle at top left, rgba(125, 211, 252, 0.16), transparent 30rem),
+                radial-gradient(circle at top right, rgba(52, 211, 153, 0.10), transparent 28rem),
+                var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            line-height: 1.5;
+        }
+
+        .page {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 32px 0 48px;
+        }
+
+        .hero {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: 1fr auto;
+            align-items: start;
+            padding: 28px;
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            background: linear-gradient(135deg, rgba(17, 24, 45, 0.96), rgba(21, 31, 56, 0.88));
+            box-shadow: var(--shadow);
+        }
+
+        .brand {
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            margin-bottom: 18px;
+        }
+
+        .logo {
+            display: grid;
+            place-items: center;
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, var(--primary), var(--success));
+            color: #06101f;
+            font-weight: 900;
+            letter-spacing: -0.08em;
+        }
+
+        h1,
+        h2,
+        h3,
+        p {
+            margin: 0;
+        }
+
+        h1 {
+            font-size: clamp(2rem, 5vw, 4rem);
+            letter-spacing: -0.06em;
+            line-height: 0.98;
+        }
+
+        h2 {
+            font-size: 1.05rem;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            margin-top: 12px;
+            max-width: 760px;
+        }
+
+        .meta {
+            min-width: 260px;
+            padding: 16px;
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            background: rgba(11, 16, 32, 0.44);
+        }
+
+        .meta dl {
+            display: grid;
+            gap: 10px;
+            margin: 0;
+        }
+
+        .meta dt {
+            color: var(--muted);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .meta dd {
+            margin: 0;
+            overflow-wrap: anywhere;
+            font-weight: 650;
+        }
+
+        .grid {
+            display: grid;
+            gap: 16px;
+            margin-top: 20px;
+        }
+
+        .cards {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .two {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .card,
+        .panel {
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            background: rgba(17, 24, 45, 0.86);
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+        }
+
+        .card {
+            padding: 18px;
+        }
+
+        .label {
+            color: var(--muted);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .value {
+            display: block;
+            margin-top: 8px;
+            font-size: clamp(1.8rem, 4vw, 2.6rem);
+            font-weight: 800;
+            letter-spacing: -0.05em;
+        }
+
+        .hint {
+            color: var(--muted);
+            margin-top: 4px;
+            font-size: 0.9rem;
+        }
+
+        .panel {
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        .chart-box {
+            min-height: 320px;
+            position: relative;
+        }
+
+        canvas {
+            max-width: 100%;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 16px;
+        }
+
+        th,
+        td {
+            padding: 12px 10px;
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+        }
+
+        th {
+            color: var(--muted);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .bar {
+            height: 9px;
+            border-radius: 999px;
+            background: rgba(145, 164, 189, 0.22);
+            overflow: hidden;
+        }
+
+        .bar span {
+            display: block;
+            height: 100%;
+            width: var(--w);
+            background: linear-gradient(90deg, var(--primary), var(--success));
+        }
+
+        .validation {
+            border-color: rgba(251, 113, 133, 0.38);
+        }
+
+        .validation-ok {
+            border-color: rgba(52, 211, 153, 0.32);
+        }
+
+        .errors-list {
+            margin: 0;
+            padding-left: 18px;
+            color: #fecdd3;
+        }
+
+        .command {
+            margin-top: 12px;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.22);
+            color: #dbeafe;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.88rem;
+        }
+
+        footer {
+            margin-top: 24px;
+            color: var(--muted);
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 900px) {
+
+            .hero,
+            .two,
+            .cards {
+                grid-template-columns: 1fr;
+            }
+
+            .meta {
+                min-width: 0;
+            }
+        }
+
+        @media print {
+            body {
+                background: #fff;
+                color: #111827;
+            }
+
+            .card,
+            .panel,
+            .hero {
+                box-shadow: none;
+                background: #fff;
+                border-color: #d1d5db;
+            }
+
+            .chart-box {
+                break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main class="page">
+        <section class="hero">
+            <div>
+                <div class="brand">
+                    <div class="logo" aria-hidden="true">cl</div>
+                    <div>
+                        <div class="label">HTTP load testing report</div>
+                        <strong>clank-cli</strong>
+                    </div>
+                </div>
+                <h1>Load Test Report</h1>
+                <p class="subtitle" id="target-url"></p>
+                <pre class="command" id="command"></pre>
+            </div>
+
+            <aside class="meta" aria-label="Report metadata">
+                <dl>
+                    <div>
+                        <dt>Generated</dt>
+                        <dd id="generated-at"></dd>
+                    </div>
+                    <div>
+                        <dt>Duration</dt>
+                        <dd id="duration"></dd>
+                    </div>
+                    <div>
+                        <dt>Rate Limit</dt>
+                        <dd id="rate-limit"></dd>
+                    </div>
+                    <div>
+                        <dt>Version</dt>
+                        <dd>clank-cli {{APP_VERSION}}</dd>
+                    </div>
+                </dl>
+            </aside>
+        </section>
+
+        <section class="grid cards" aria-label="Summary cards">
+            <article class="card">
+                <span class="label">Total Requests</span>
+                <strong class="value" id="total-requests"></strong>
+                <p class="hint" id="request-subtitle"></p>
+            </article>
+            <article class="card">
+                <span class="label">Throughput</span>
+                <strong class="value" id="throughput"></strong>
+                <p class="hint">requests per second</p>
+            </article>
+            <article class="card">
+                <span class="label">Success Rate</span>
+                <strong class="value" id="success-rate"></strong>
+                <p class="hint" id="success-subtitle"></p>
+            </article>
+            <article class="card">
+                <span class="label">Total Errors</span>
+                <strong class="value" id="total-errors"></strong>
+                <p class="hint" id="error-subtitle"></p>
+            </article>
+        </section>
+
+        <section class="grid two">
+            <article class="panel">
+                <h2>Latency Percentiles</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Value</th>
+                            <th>Visual</th>
+                        </tr>
+                    </thead>
+                    <tbody id="latency-table"></tbody>
+                </table>
+            </article>
+
+            <article class="panel">
+                <h2>Status Codes</h2>
+                <div class="chart-box" aria-label="Status code breakdown chart">
+                    <canvas id="status-chart"></canvas>
+                </div>
+            </article>
+        </section>
+
+        <section class="grid two">
+            <article class="panel">
+                <h2>Latency Histogram</h2>
+                <div class="chart-box" aria-label="Latency histogram chart">
+                    <canvas id="latency-chart"></canvas>
+                </div>
+            </article>
+
+            <article class="panel">
+                <h2>Error Distribution</h2>
+                <div class="chart-box" aria-label="Error distribution chart">
+                    <canvas id="error-chart"></canvas>
+                </div>
+            </article>
+        </section>
+
+        <section class="grid">
+            <article class="panel" id="validation-panel">
+                <h2>Response Validation</h2>
+                <div id="validation-content"></div>
+            </article>
+        </section>
+
+        <footer>
+            Generated by clank-cli · Chart.js v{{CHART_JS_VERSION}} · self-contained offline report
+        </footer>
+    </main>
+
+    <script>
+        {{CHART_JS}}
+    </script>
+
+    <script id="report-data" type="application/json">
+{{REPORT_DATA}}
+  </script>
+
+    <script>
+        const report = JSON.parse(document.getElementById("report-data").textContent);
+
+        const fmt = new Intl.NumberFormat("en-US");
+        const pct = (value) => `${Number(value).toFixed(1)}%`;
+        const ms = (value) => `${Number(value).toFixed(1)}ms`;
+        const rps = (value) => Number(value).toFixed(1);
+
+        document.getElementById("target-url").textContent = report.metadata.target_url;
+        document.getElementById("command").textContent = report.metadata.command;
+        document.getElementById("generated-at").textContent =
+            new Date(report.metadata.timestamp * 1000).toLocaleString();
+        document.getElementById("duration").textContent = `${Number(report.metadata.duration_secs).toFixed(2)}s`;
+        document.getElementById("rate-limit").textContent = report.metadata.rate_limit;
+
+        document.getElementById("total-requests").textContent = fmt.format(report.summary.total_requests);
+        document.getElementById("request-subtitle").textContent =
+            `${fmt.format(report.summary.retries)} retries recorded`;
+        document.getElementById("throughput").textContent = rps(report.summary.rps);
+        document.getElementById("success-rate").textContent = pct(report.summary.success_rate);
+        document.getElementById("success-subtitle").textContent =
+            `${fmt.format(report.summary.successful)} successful responses`;
+        document.getElementById("total-errors").textContent = fmt.format(report.summary.failed);
+        document.getElementById("error-subtitle").textContent =
+            `${fmt.format(report.summary.validation_errors)} validation errors`;
+
+        const latencyRows = [
+            ["Min", report.latency.min_ms],
+            ["Average", report.summary.avg_latency_ms],
+            ["P50", report.latency.p50_ms],
+            ["P90", report.latency.p90_ms],
+            ["P95", report.latency.p95_ms],
+            ["P99", report.latency.p99_ms],
+            ["Max", report.latency.max_ms],
+        ];
+
+        const maxLatency = Math.max(...latencyRows.map((row) => row[1]), 1);
+        document.getElementById("latency-table").innerHTML = latencyRows
+            .map(([label, value]) => {
+                const width = Math.max(3, Math.min(100, (value / maxLatency) * 100));
+                return `
+          <tr>
+            <td>${label}</td>
+            <td>${ms(value)}</td>
+            <td><div class="bar" aria-label="${label} latency bar"><span style="--w:${width}%"></span></div></td>
+          </tr>
+        `;
+            })
+            .join("");
+
+        const chartDefaults = {
+            color: "#91a4bd",
+            font: { family: "system-ui, -apple-system, Segoe UI, sans-serif" }
+        };
+
+        Chart.defaults.color = chartDefaults.color;
+        Chart.defaults.font = chartDefaults.font;
+
+        function chartColors(count) {
+            const colors = ["#7dd3fc", "#34d399", "#fbbf24", "#fb7185", "#c084fc", "#60a5fa"];
+            return Array.from({ length: count }, (_, index) => colors[index % colors.length]);
+        }
+
+        function renderBarChart(canvasId, points, label, labelKey, valueKey) {
+            const labels = points.map((point) => point[labelKey]);
+            const values = points.map((point) => point[valueKey]);
+
+            new Chart(document.getElementById(canvasId), {
+                type: "bar",
+                data: {
+                    labels,
+                    datasets: [{
+                        label,
+                        data: values,
+                        backgroundColor: chartColors(values.length),
+                        borderWidth: 0,
+                        borderRadius: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { color: "rgba(148, 163, 184, 0.12)" } },
+                        y: { beginAtZero: true, grid: { color: "rgba(148, 163, 184, 0.12)" } }
+                    }
+                }
+            });
+        }
+
+        function renderDoughnutChart(canvasId, points) {
+            const labels = points.map((point) => String(point.code));
+            const values = points.map((point) => point.count);
+
+            new Chart(document.getElementById(canvasId), {
+                type: "doughnut",
+                data: {
+                    labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: chartColors(values.length),
+                        borderColor: "#11182d",
+                        borderWidth: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: "bottom" }
+                    }
+                }
+            });
+        }
+
+        renderBarChart(
+            "latency-chart",
+            report.latency_histogram,
+            "Requests",
+            "bucket_label",
+            "count"
+        );
+
+        renderDoughnutChart(
+            "status-chart",
+            report.status_codes.length ? report.status_codes : [{ code: 0, count: 1 }]
+        );
+
+        renderBarChart(
+            "error-chart",
+            report.errors.length ? report.errors : [{ type: "No errors", count: 0 }],
+            "Errors",
+            "type",
+            "count"
+        );
+
+        const validationPanel = document.getElementById("validation-panel");
+        const validationContent = document.getElementById("validation-content");
+
+        if (report.validation && report.validation.failures.length > 0) {
+            validationPanel.classList.add("validation");
+            validationContent.innerHTML = `
+<p class="hint">${fmt.format(report.validation.failures.length)} validation error(s) were recorded.</p>
+<ul class="errors-list">
+  ${report.validation.failures.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
+</ul>
+`;
+        } else if (report.validation) {
+            validationPanel.classList.add("validation-ok");
+            validationContent.innerHTML = `<p class="hint">Response validation was configured and all checks passed.</p>`;
+        } else {
+            validationPanel.classList.add("validation-ok");
+            validationContent.innerHTML = `<p class="hint">No response validation rules were configured.</p>`;
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+    </script>
+</body>
+
+</html>

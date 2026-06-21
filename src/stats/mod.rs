@@ -389,7 +389,9 @@ pub fn format_summary_with_rate_limit_and_color_and_format(
         OutputFormat::Text => {
             format_summary_text_with_rate_limit_and_color(snapshot, color_enabled, rate_limit)
         }
-        OutputFormat::Json => format_summary_json_with_rate_limit(snapshot, rate_limit),
+        OutputFormat::Json | OutputFormat::Html => {
+            format_summary_json_with_rate_limit(snapshot, rate_limit)
+        }
         OutputFormat::Csv => format_summary_csv_with_rate_limit(snapshot, rate_limit),
     }
 }

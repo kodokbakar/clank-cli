@@ -18,6 +18,7 @@ pub enum OutputFormat {
     Text,
     Json,
     Csv,
+    Html,
 }
 
 impl FromStr for OutputFormat {
@@ -28,8 +29,9 @@ impl FromStr for OutputFormat {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
             "csv" => Ok(Self::Csv),
+            "html" => Ok(Self::Html),
             _ => Err(format!(
-                "unsupported output format: {input}. Supported formats: text, json, csv"
+                "unsupported output format: {input}. Supported formats: text, json, csv, html"
             )),
         }
     }
@@ -527,6 +529,8 @@ timeout_secs: 0
         assert_eq!(parse_output_format("csv")?, OutputFormat::Csv);
         assert_eq!(parse_output_format("TEXT")?, OutputFormat::Text);
         assert_eq!(parse_output_format(" Json ")?, OutputFormat::Json);
+        assert_eq!(parse_output_format("html")?, OutputFormat::Html);
+        assert_eq!(parse_output_format(" HTML ")?, OutputFormat::Html);
 
         Ok(())
     }

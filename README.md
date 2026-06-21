@@ -12,7 +12,7 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - ETA estimation for duration-based tests
 - Color-coded output (green success, red errors)
 - Graceful shutdown with Ctrl+C (waits for in-flight requests)
-- Multiple output formats: plain text, JSON, CSV
+- Multiple output formats: plain text, JSON, CSV, and self-contained HTML reports
 - YAML config file support (`clank.yaml`)
 - Custom headers and request body (inline or from file)
 - Supports GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
@@ -22,8 +22,9 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - Retry support with `--retry` and `--retry-delay`
 - Keep-alive control with `--keep-alive` and `--no-keep-alive`
 - Response validation with `--expect-status`, `--expect-body`, and `--expect-header`
-- Validation error stats in plain text, JSON, CSV, and live terminal output
-- Retry stats in plain text, JSON, and CSV output
+- Validation error stats in plain text, JSON, CSV, HTML report, and live terminal output
+- Retry stats in plain text, JSON, CSV, and HTML report output
+- HTML report output with charts, dark theme, and offline browser support
 
 ## Installation
 
@@ -75,6 +76,12 @@ clank-cli https://api.example.com -n 1000 -o json | jq '.latency.p99_ms'
 
 # CSV output for spreadsheet import
 clank-cli https://api.example.com -n 1000 -o csv > results.csv
+
+# HTML report with charts
+clank-cli https://api.example.com -n 1000 -o html
+
+# HTML report with custom output path
+clank-cli https://api.example.com -n 1000 -o html --output-file reports/api-report.html
 
 # Skip config file
 clank-cli https://api.example.com --no-config
@@ -355,6 +362,49 @@ Validation behavior:
 
 Response validation runs after retry handling. For example, if a request returns `503` and then succeeds with `200` after retry, validation is applied to the final response.
 
+## HTML Report
+
+Use `--output html` to generate a self-contained browser report instead of printing the full summary to stdout.
+
+HTML reports are useful when you want to share load test results with teammates or review charts visually after a run. The report includes summary cards, latency percentiles, latency histogram, status code breakdown, error distribution, response validation details, command metadata, and version information.
+
+Examples:
+
+```bash
+# Generate an HTML report with an automatic file name
+clank-cli http://localhost:8080 -n 1000 -c 20 --output html
+
+# Write the HTML report to a specific path
+clank-cli http://localhost:8080 -n 1000 -c 20 \
+  --output html \
+  --output-file reports/local-api-report.html
+
+# Combine HTML report with validation, retry, rate limiting, and ramp-up
+clank-cli http://localhost:8080 \
+  --output html \
+  --output-file reports/load-test.html \
+  --expect-status 200 \
+  --expect-body "ok" \
+  --retry 3 \
+  --rate-limit 100/s \
+  --ramp-up 10s \
+  --duration 30s
+```
+
+When `--output-file` is omitted, `clank-cli` generates a file name based on the target URL and current timestamp:
+
+```text
+<target>-report-<timestamp>.html
+```
+
+The generated report is self-contained. It embeds the report data, CSS, JavaScript, and Chart.js bundle directly in the HTML file, so it can be opened without an internet connection.
+
+HTML report output prints the generated file path to stdout:
+
+```text
+HTML report written to http-localhost-8080-report-1700000000.html
+```
+
 ## CLI Reference
 
 | Flag | Short | Description | Default |
@@ -377,7 +427,8 @@ Response validation runs after retry handling. For example, if a request returns
 | `--expect-body <PATTERN>` | | Validate response body with a case-sensitive pattern | — |
 | `--expect-header <KEY: VALUE>` | | Validate response header (repeatable) | — |
 | `--timeout-secs` | | Request timeout in seconds | 10 |
-| `-o, --output` | `-o` | Output format (`text`, `json`, `csv`) | text |
+| `-o, --output` | `-o` | Output format (`text`, `json`, `csv`, `html`) | text |
+| `--output-file <PATH>` | | HTML report output path, only valid with `--output html` | auto-generated |
 | `-f, --config` | `-f` | Config file path | `clank.yaml` |
 | `--no-config` | | Skip config file | false |
 | `-k, --insecure` | `-k` | Skip TLS verification | false |
@@ -456,6 +507,39 @@ total_requests,validation_errors,retries,successful,errors,error_rate,avg_ms,p50
 1234,3,12,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
 ```
 
+### HTML (`-o html`)
+
+HTML output writes a self-contained `.html` report file and prints the generated path to stdout.
+
+```bash
+clank-cli http://localhost:8080 -n 1000 -c 20 -o html
+```
+
+Example stdout:
+
+```text
+HTML report written to http-localhost-8080-report-1700000000.html
+```
+
+Use `--output-file` to choose the destination:
+
+```bash
+clank-cli http://localhost:8080 -n 1000 -c 20 \
+  -o html \
+  --output-file reports/load-test.html
+```
+
+The report includes:
+
+* Summary cards for total requests, throughput, success rate, and errors
+* Latency percentile table
+* Latency histogram chart
+* Status code breakdown chart
+* Error distribution chart
+* Response validation details
+* Target URL, command, duration, version, and rate limit metadata
+* Bundled Chart.js for offline viewing
+
 ## FAQ
 
 ### Why should I use ramp-up?
@@ -512,6 +596,7 @@ For cross-platform builds, see `scripts/build.sh`.
 - **Latency:** [HdrHistogram](https://docs.rs/hdrhistogram)
 - **Progress:** [indicatif](https://docs.rs/indicatif)
 - **Output:** [serde](https://docs.rs/serde) + [serde_json](https://docs.rs/serde_json)
+- **HTML reports:** Self-contained template with bundled Chart.js
 - **Config:** [serde_yaml](https://docs.rs/serde_yaml)
 
 ## License

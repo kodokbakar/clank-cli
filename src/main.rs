@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clank_cli::config::{
@@ -9,6 +9,7 @@ use clank_cli::config::{
     parse_output_format, parse_rate_limit, validate_method,
 };
 use clank_cli::engine::{Engine, EngineConfig, RateLimiter, ValidationConfig};
+use clank_cli::report::{HtmlReportContext, render_html_report};
 use clank_cli::stats::format_summary_with_rate_limit_and_color_and_format;
 use clap::{ArgAction, Parser};
 use console::Term;
@@ -88,8 +89,17 @@ struct Cli {
     #[arg(long)]
     timeout_secs: Option<u64>,
 
-    #[arg(short = 'o', long, value_name = "FORMAT", value_parser = parse_output_format_arg)]
+    #[arg(
+    short = 'o',
+    long,
+    value_name = "FORMAT",
+    action = ArgAction::Set,
+    value_parser = parse_output_format_arg
+    )]
     output: Option<OutputFormat>,
+
+    #[arg(long = "output-file", value_name = "PATH")]
+    output_file: Option<PathBuf>,
 
     #[arg(short = 'k', long)]
     insecure: bool,
@@ -141,12 +151,16 @@ async fn main() -> Result<()> {
     let timeout_secs = resolve_timeout_secs(&cli, file_config.as_ref());
     let insecure = resolve_insecure(&cli, file_config.as_ref());
     let output_format = resolve_output_format(&cli, file_config.as_ref())?;
+    validate_output_file_usage(output_format, cli.output_file.as_deref())?;
     let rate_limit = resolve_rate_limit(&cli, file_config.as_ref());
     let ramp_up = resolve_ramp_up(&cli);
     let ramp_up_step = resolve_ramp_up_step(&cli);
     let keep_alive = resolve_keep_alive(&cli);
     let retry = cli.retry;
     let retry_delay = cli.retry_delay;
+    let report_target_url = url.clone();
+    let report_validation = validation.clone();
+    let report_command = std::env::args().collect::<Vec<_>>().join(" ");
     let rate_limiter = rate_limit
         .map(RateLimiter::from_config)
         .transpose()?
@@ -196,15 +210,32 @@ async fn main() -> Result<()> {
         engine.run().await?
     };
 
-    println!(
-        "{}",
-        format_summary_with_rate_limit_and_color_and_format(
-            &snapshot,
-            output_format,
-            output_color_enabled,
-            rate_limit.as_ref(),
-        )
-    );
+    match output_format {
+        OutputFormat::Html => {
+            let report_path = write_html_report(
+                &snapshot,
+                cli.output_file.as_deref(),
+                &report_target_url,
+                &report_command,
+                rate_limit.as_ref(),
+                concurrency,
+                &report_validation,
+            )?;
+
+            println!("HTML report written to {}", report_path.display());
+        }
+        OutputFormat::Text | OutputFormat::Json | OutputFormat::Csv => {
+            println!(
+                "{}",
+                format_summary_with_rate_limit_and_color_and_format(
+                    &snapshot,
+                    output_format,
+                    output_color_enabled,
+                    rate_limit.as_ref(),
+                )
+            );
+        }
+    }
 
     exit_if_validation_failed(&snapshot);
 
@@ -223,6 +254,89 @@ fn exit_if_validation_failed(snapshot: &clank_cli::stats::StatsSnapshot) {
     }
 
     std::process::exit(1);
+}
+
+fn write_html_report(
+    snapshot: &clank_cli::stats::StatsSnapshot,
+    output_file: Option<&Path>,
+    target_url: &str,
+    command: &str,
+    rate_limit: Option<&RateLimitConfig>,
+    concurrency: usize,
+    validation: &ValidationConfig,
+) -> Result<PathBuf> {
+    let generated_at = SystemTime::now();
+    let report_path = output_file
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_html_report_path(target_url, generated_at));
+
+    if let Some(parent) = report_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create HTML report directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let context = HtmlReportContext {
+        snapshot,
+        target_url,
+        command,
+        rate_limit,
+        generated_at,
+        app_version: env!("CARGO_PKG_VERSION"),
+        concurrency,
+        validation: Some(validation),
+    };
+
+    let html = render_html_report(&context);
+
+    fs::write(&report_path, html)
+        .with_context(|| format!("failed to write HTML report: {}", report_path.display()))?;
+
+    Ok(report_path)
+}
+
+fn default_html_report_path(target_url: &str, generated_at: SystemTime) -> PathBuf {
+    let timestamp = generated_at
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+    PathBuf::from(format!(
+        "{}-report-{timestamp}.html",
+        target_url_slug(target_url)
+    ))
+}
+
+fn target_url_slug(target_url: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+
+    for character in target_url.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+
+        if slug.len() >= 80 {
+            break;
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+
+    if slug.is_empty() {
+        "clank-cli".to_string()
+    } else {
+        slug.to_string()
+    }
 }
 
 fn load_config(cli: &Cli) -> Result<Option<ClankConfig>> {
@@ -435,6 +549,17 @@ fn resolve_output_format(cli: &Cli, config: Option<&ClankConfig>) -> Result<Outp
     Ok(OutputFormat::Text)
 }
 
+fn validate_output_file_usage(
+    output_format: OutputFormat,
+    output_file: Option<&Path>,
+) -> Result<()> {
+    if output_file.is_some() && output_format != OutputFormat::Html {
+        bail!("--output-file can only be used with --output html");
+    }
+
+    Ok(())
+}
+
 fn resolve_rate_limit(cli: &Cli, config: Option<&ClankConfig>) -> Option<RateLimitConfig> {
     cli.rate_limit
         .or_else(|| config.and_then(|config| config.rate_limit))
@@ -520,6 +645,7 @@ mod tests {
             retry_delay: Duration::ZERO,
             timeout_secs: None,
             output: None,
+            output_file: None,
             insecure: false,
             keep_alive: false,
             no_keep_alive: false,
@@ -584,6 +710,50 @@ mod tests {
         config.output = Some("xml".to_string());
 
         assert!(resolve_output_format(&cli(), Some(&config)).is_err());
+    }
+
+    #[test]
+    fn resolve_output_format_accepts_html_cli_value() -> Result<()> {
+        let mut cli = cli();
+        cli.output = Some(OutputFormat::Html);
+
+        assert_eq!(
+            resolve_output_format(&cli, Some(&config()))?,
+            OutputFormat::Html
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn validate_output_file_usage_accepts_html_output() -> Result<()> {
+        validate_output_file_usage(OutputFormat::Html, Some(Path::new("report.html")))
+    }
+
+    #[test]
+    fn validate_output_file_usage_rejects_non_html_output() {
+        let error = validate_output_file_usage(OutputFormat::Json, Some(Path::new("report.html")))
+            .expect_err("json output should not accept --output-file");
+
+        assert!(error.to_string().contains("--output-file"));
+    }
+
+    #[test]
+    fn default_html_report_path_uses_sanitized_target_and_timestamp() {
+        let path = default_html_report_path(
+            "http://localhost:8080/api/v1",
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+
+        assert_eq!(
+            path,
+            PathBuf::from("http-localhost-8080-api-v1-report-1700000000.html")
+        );
+    }
+
+    #[test]
+    fn target_url_slug_falls_back_for_empty_input() {
+        assert_eq!(target_url_slug("://"), "clank-cli");
     }
 
     #[test]
