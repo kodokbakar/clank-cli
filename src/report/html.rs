@@ -285,11 +285,23 @@ mod tests {
         assert!(html.contains("http://localhost:8000"));
         assert!(html.contains("Chart.js v4.5.1"));
         assert!(html.contains("new Chart("));
+        assert!(html.contains("Chart.defaults"));
         assert!(html.contains("application/json"));
         assert!(html.contains("expected body to match pattern"));
-        assert!(!html.contains("https://"));
+
+        let chart_bundle_marker = &CHART_JS[..CHART_JS.len().min(80)];
+        assert!(html.contains(chart_bundle_marker));
+
+        assert!(!html.contains("src=\"http://"));
+        assert!(!html.contains("src=\"https://"));
+        assert!(!html.contains("href=\"http://"));
+        assert!(!html.contains("href=\"https://"));
+        assert!(!html.contains("url(http://"));
+        assert!(!html.contains("url(https://"));
+        assert!(!html.contains("@import"));
         assert!(!html.contains("{{REPORT_DATA}}"));
         assert!(!html.contains("{{CHART_JS}}"));
+        assert!(!html.contains("{ { CHART_JS } }"));
     }
 
     #[test]
