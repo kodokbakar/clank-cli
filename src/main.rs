@@ -206,7 +206,23 @@ async fn main() -> Result<()> {
         )
     );
 
+    exit_if_validation_failed(&snapshot);
+
     Ok(())
+}
+
+fn exit_if_validation_failed(snapshot: &clank_cli::stats::StatsSnapshot) {
+    if snapshot.validation_errors == 0 {
+        return;
+    }
+
+    eprintln!("Validation failed:");
+
+    for error in &snapshot.errors {
+        eprintln!("- {error}");
+    }
+
+    std::process::exit(1);
 }
 
 fn load_config(cli: &Cli) -> Result<Option<ClankConfig>> {
