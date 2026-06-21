@@ -1,3 +1,5 @@
+pub mod data;
 pub mod html;
 
-pub use html::{HtmlReportContext, render_html_report};
+pub use data::{HtmlReportContext, HtmlReportData};
+pub use html::render_html_report;

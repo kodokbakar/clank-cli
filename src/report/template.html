@@ -418,27 +418,27 @@
         const ms = (value) => `${Number(value).toFixed(1)}ms`;
         const rps = (value) => Number(value).toFixed(1);
 
-        document.getElementById("target-url").textContent = report.target_url;
-        document.getElementById("command").textContent = report.command;
+        document.getElementById("target-url").textContent = report.metadata.target_url;
+        document.getElementById("command").textContent = report.metadata.command;
         document.getElementById("generated-at").textContent =
-            new Date(report.generated_at_unix_secs * 1000).toLocaleString();
-        document.getElementById("duration").textContent = `${Number(report.duration_secs).toFixed(2)}s`;
-        document.getElementById("rate-limit").textContent = report.rate_limit;
+            new Date(report.metadata.timestamp * 1000).toLocaleString();
+        document.getElementById("duration").textContent = `${Number(report.metadata.duration_secs).toFixed(2)}s`;
+        document.getElementById("rate-limit").textContent = report.metadata.rate_limit;
 
-        document.getElementById("total-requests").textContent = fmt.format(report.total_requests);
+        document.getElementById("total-requests").textContent = fmt.format(report.summary.total_requests);
         document.getElementById("request-subtitle").textContent =
-            `${fmt.format(report.retries)} retries recorded`;
-        document.getElementById("throughput").textContent = rps(report.throughput_rps);
-        document.getElementById("success-rate").textContent = pct(report.success_rate);
+            `${fmt.format(report.summary.retries)} retries recorded`;
+        document.getElementById("throughput").textContent = rps(report.summary.rps);
+        document.getElementById("success-rate").textContent = pct(report.summary.success_rate);
         document.getElementById("success-subtitle").textContent =
-            `${fmt.format(report.successful_requests)} successful responses`;
-        document.getElementById("total-errors").textContent = fmt.format(report.total_errors);
+            `${fmt.format(report.summary.successful)} successful responses`;
+        document.getElementById("total-errors").textContent = fmt.format(report.summary.failed);
         document.getElementById("error-subtitle").textContent =
-            `${fmt.format(report.validation_errors)} validation errors`;
+            `${fmt.format(report.summary.validation_errors)} validation errors`;
 
         const latencyRows = [
             ["Min", report.latency.min_ms],
-            ["Average", report.latency.avg_ms],
+            ["Average", report.summary.avg_latency_ms],
             ["P50", report.latency.p50_ms],
             ["P90", report.latency.p90_ms],
             ["P95", report.latency.p95_ms],
@@ -473,9 +473,9 @@
             return Array.from({ length: count }, (_, index) => colors[index % colors.length]);
         }
 
-        function renderBarChart(canvasId, points, label) {
-            const labels = points.map((point) => point.label);
-            const values = points.map((point) => point.value);
+        function renderBarChart(canvasId, points, label, labelKey, valueKey) {
+            const labels = points.map((point) => point[labelKey]);
+            const values = points.map((point) => point[valueKey]);
 
             new Chart(document.getElementById(canvasId), {
                 type: "bar",
@@ -502,8 +502,8 @@
         }
 
         function renderDoughnutChart(canvasId, points) {
-            const labels = points.map((point) => point.label);
-            const values = points.map((point) => point.value);
+            const labels = points.map((point) => String(point.code));
+            const values = points.map((point) => point.count);
 
             new Chart(document.getElementById(canvasId), {
                 type: "doughnut",
@@ -526,24 +526,44 @@
             });
         }
 
-        renderBarChart("latency-chart", report.latency_buckets, "Requests");
-        renderDoughnutChart("status-chart", report.status_codes.length ? report.status_codes : [{ label: "No status codes", value: 1 }]);
-        renderBarChart("error-chart", report.error_breakdown.length ? report.error_breakdown : [{ label: "No errors", value: 0 }], "Errors");
+        renderBarChart(
+            "latency-chart",
+            report.latency_histogram,
+            "Requests",
+            "bucket_label",
+            "count"
+        );
+
+        renderDoughnutChart(
+            "status-chart",
+            report.status_codes.length ? report.status_codes : [{ code: 0, count: 1 }]
+        );
+
+        renderBarChart(
+            "error-chart",
+            report.errors.length ? report.errors : [{ type: "No errors", count: 0 }],
+            "Errors",
+            "type",
+            "count"
+        );
 
         const validationPanel = document.getElementById("validation-panel");
         const validationContent = document.getElementById("validation-content");
 
-        if (report.validation.has_validation_errors) {
+        if (report.validation && report.validation.failures.length > 0) {
             validationPanel.classList.add("validation");
             validationContent.innerHTML = `
-        <p class="hint">${fmt.format(report.validation.count)} validation error(s) were recorded.</p>
-        <ul class="errors-list">
-          ${report.validation.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
-        </ul>
-      `;
+<p class="hint">${fmt.format(report.validation.failures.length)} validation error(s) were recorded.</p>
+<ul class="errors-list">
+  ${report.validation.failures.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
+</ul>
+`;
+        } else if (report.validation) {
+            validationPanel.classList.add("validation-ok");
+            validationContent.innerHTML = `<p class="hint">Response validation was configured and all checks passed.</p>`;
         } else {
             validationPanel.classList.add("validation-ok");
-            validationContent.innerHTML = `<p class="hint">No response validation errors were recorded.</p>`;
+            validationContent.innerHTML = `<p class="hint">No response validation rules were configured.</p>`;
         }
 
         function escapeHtml(value) {
