@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-06-21
+
+### Added
+
+- HTML report output format with `--output html`.
+- `--output-file <PATH>` CLI flag for writing HTML reports to a custom path.
+- Self-contained offline HTML report with bundled Chart.js.
+- HTML report charts for latency histogram, status code breakdown, and error distribution.
+- Dark themed responsive HTML report layout with print-friendly styling.
+- `src/report/` module for HTML report rendering and report-specific data transformation.
+- `HtmlReportData` pipeline for converting `StatsSnapshot` into browser-parseable report JSON.
+- Integration tests for HTML report file generation, custom output paths, embedded report data accuracy, write failures, and JSON output regression.
+
+### Changed
+
+- Output format support now includes `html` in addition to `text`, `json`, and `csv`.
+
 ## [0.2.4] - 2026-06-21
 
 ### Added
