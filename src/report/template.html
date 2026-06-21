@@ -7,17 +7,32 @@
     <title>clank-cli Load Test Report</title>
     <style>
         :root {
-            --bg: #0b1020;
-            --panel: #11182d;
-            --panel-2: #151f38;
-            --text: #e5edf7;
-            --muted: #91a4bd;
-            --border: rgba(148, 163, 184, 0.22);
-            --primary: #7dd3fc;
-            --success: #34d399;
-            --warning: #fbbf24;
-            --danger: #fb7185;
-            --shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+            --sys-surface: #121014;
+            --sys-surface-container-low: #1D1B20;
+            --sys-surface-container: #211F26;
+            --sys-surface-container-high: #2B2930;
+            --sys-surface-container-highest: #36343B;
+
+            --sys-on-surface: #E8E0E9;
+            --sys-on-surface-variant: #CAC4D0;
+
+            --sys-primary: #D0BCFF;
+            --sys-on-primary: #381E72;
+            --sys-primary-container: #4F378B;
+
+            --sys-tertiary: #A0CBA0;
+            --sys-tertiary-container: #2F4D34;
+
+            --sys-error: #F2B8B5;
+            --sys-error-container: #8C1D18;
+            --sys-on-error-container: #F9DEDC;
+
+            --sys-outline-variant: #49454E;
+
+            --radius-xl: 28px;
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
         }
 
         * {
@@ -26,107 +41,92 @@
 
         body {
             margin: 0;
-            background:
-                radial-gradient(circle at top left, rgba(125, 211, 252, 0.16), transparent 30rem),
-                radial-gradient(circle at top right, rgba(52, 211, 153, 0.10), transparent 28rem),
-                var(--bg);
-            color: var(--text);
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--sys-surface);
+            color: var(--sys-on-surface);
+            font-family: system-ui, -apple-system, sans-serif;
             line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
         }
 
         .page {
             width: min(1180px, calc(100% - 32px));
             margin: 0 auto;
-            padding: 32px 0 48px;
+            padding: 24px 0 40px;
         }
 
+        /* Header — M3 filled card, no noise */
         .hero {
             display: grid;
-            gap: 20px;
-            grid-template-columns: 1fr auto;
-            align-items: start;
-            padding: 28px;
-            border: 1px solid var(--border);
-            border-radius: 28px;
-            background: linear-gradient(135deg, rgba(17, 24, 45, 0.96), rgba(21, 31, 56, 0.88));
-            box-shadow: var(--shadow);
+            gap: 12px;
+            padding: 20px 24px;
+            border-radius: var(--radius-xl);
+            background: var(--sys-surface-container-high);
         }
 
-        .brand {
-            display: flex;
-            gap: 14px;
-            align-items: center;
-            margin-bottom: 18px;
+        .target-url {
+            font-size: 1.25rem;
+            font-weight: 600;
+            word-break: break-all;
+            overflow-wrap: anywhere;
+            color: var(--sys-on-surface);
         }
 
-        .logo {
-            display: grid;
-            place-items: center;
-            width: 48px;
-            height: 48px;
-            border-radius: 16px;
-            background: linear-gradient(135deg, var(--primary), var(--success));
-            color: #06101f;
-            font-weight: 900;
-            letter-spacing: -0.08em;
+        /* Command — scrollable, no overflow */
+        .command {
+            margin-top: 10px;
+            padding: 6px 10px;
+            border-radius: var(--radius-sm);
+            background: var(--sys-surface-container-low);
+            border: 1px solid var(--sys-outline-variant);
+            color: var(--sys-on-surface-variant);
+            font-size: 0.75rem;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre;
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
         }
 
-        h1,
-        h2,
-        h3,
-        p {
-            margin: 0;
-        }
-
-        h1 {
-            font-size: clamp(2rem, 5vw, 4rem);
-            letter-spacing: -0.06em;
-            line-height: 0.98;
-        }
-
-        h2 {
-            font-size: 1.05rem;
-            margin-bottom: 16px;
-        }
-
-        .subtitle {
-            color: var(--muted);
-            margin-top: 12px;
-            max-width: 760px;
-        }
-
+        /* Meta — compact 2x2 grid, full width below command */
         .meta {
-            min-width: 260px;
-            padding: 16px;
-            border: 1px solid var(--border);
-            border-radius: 18px;
-            background: rgba(11, 16, 32, 0.44);
-        }
-
-        .meta dl {
             display: grid;
-            gap: 10px;
-            margin: 0;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px 20px;
+            padding: 10px 16px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--sys-outline-variant);
+            background: var(--sys-surface-container);
+            white-space: nowrap;
         }
 
         .meta dt {
-            color: var(--muted);
-            font-size: 0.78rem;
+            color: var(--sys-on-surface-variant);
+            font-size: 0.62rem;
+            font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
 
         .meta dd {
             margin: 0;
-            overflow-wrap: anywhere;
-            font-weight: 650;
+            font-weight: 600;
+            font-size: 0.8rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
+        .meta dt {
+            color: var(--sys-on-surface-variant);
+            font-size: 0.62rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        /* Grid layouts */
         .grid {
             display: grid;
-            gap: 16px;
-            margin-top: 20px;
+            gap: 14px;
+            margin-top: 18px;
         }
 
         .cards {
@@ -137,46 +137,53 @@
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
-        .card,
-        .panel {
-            border: 1px solid var(--border);
-            border-radius: 22px;
-            background: rgba(17, 24, 45, 0.86);
-            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
-        }
-
+        /* Cards */
         .card {
-            padding: 18px;
+            padding: 16px;
+            border-radius: var(--radius-lg);
+            background: var(--sys-surface-container-high);
         }
 
         .label {
-            color: var(--muted);
-            font-size: 0.78rem;
+            color: var(--sys-on-surface-variant);
+            font-size: 0.65rem;
+            font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
 
         .value {
             display: block;
-            margin-top: 8px;
-            font-size: clamp(1.8rem, 4vw, 2.6rem);
+            margin-top: 6px;
+            font-size: clamp(1.6rem, 3.5vw, 2.2rem);
             font-weight: 800;
-            letter-spacing: -0.05em;
+            letter-spacing: -0.04em;
+            color: var(--sys-primary);
         }
 
         .hint {
-            color: var(--muted);
-            margin-top: 4px;
-            font-size: 0.9rem;
+            color: var(--sys-on-surface-variant);
+            margin-top: 2px;
+            font-size: 0.78rem;
         }
 
         .panel {
-            padding: 20px;
+            padding: 18px;
+            border-radius: var(--radius-lg);
+            background: var(--sys-surface-container-high);
             overflow: hidden;
         }
 
+        h2 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            margin: 0 0 14px;
+            color: var(--sys-on-surface);
+        }
+
         .chart-box {
-            min-height: 320px;
+            min-height: 300px;
             position: relative;
         }
 
@@ -187,20 +194,20 @@
         table {
             width: 100%;
             border-collapse: collapse;
-            overflow: hidden;
-            border-radius: 16px;
         }
 
         th,
         td {
-            padding: 12px 10px;
-            border-bottom: 1px solid var(--border);
+            padding: 10px 8px;
+            border-bottom: 1px solid var(--sys-outline-variant);
             text-align: left;
+            font-size: 0.82rem;
         }
 
         th {
-            color: var(--muted);
-            font-size: 0.78rem;
+            color: var(--sys-on-surface-variant);
+            font-size: 0.65rem;
+            font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
@@ -210,9 +217,9 @@
         }
 
         .bar {
-            height: 9px;
+            height: 6px;
             border-radius: 999px;
-            background: rgba(145, 164, 189, 0.22);
+            background: var(--sys-surface-container-highest);
             overflow: hidden;
         }
 
@@ -220,71 +227,59 @@
             display: block;
             height: 100%;
             width: var(--w);
-            background: linear-gradient(90deg, var(--primary), var(--success));
+            background: var(--sys-primary);
+            border-radius: 999px;
         }
 
         .validation {
-            border-color: rgba(251, 113, 133, 0.38);
+            border: 1px solid var(--sys-error-container);
+            background: var(--sys-error-container);
         }
 
         .validation-ok {
-            border-color: rgba(52, 211, 153, 0.32);
+            border: 1px solid var(--sys-tertiary-container);
+            background: var(--sys-tertiary-container);
         }
 
         .errors-list {
             margin: 0;
             padding-left: 18px;
-            color: #fecdd3;
-        }
-
-        .command {
-            margin-top: 12px;
-            padding: 14px;
-            border-radius: 14px;
-            border: 1px solid var(--border);
-            background: rgba(0, 0, 0, 0.22);
-            color: #dbeafe;
-            overflow-x: auto;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-size: 0.88rem;
+            color: var(--sys-on-error-container);
         }
 
         footer {
-            margin-top: 24px;
-            color: var(--muted);
+            margin-top: 20px;
+            color: var(--sys-on-surface-variant);
             text-align: center;
-            font-size: 0.9rem;
+            font-size: 0.78rem;
         }
 
         @media (max-width: 900px) {
-
-            .hero,
             .two,
             .cards {
                 grid-template-columns: 1fr;
-            }
-
-            .meta {
-                min-width: 0;
             }
         }
 
         @media print {
             body {
-                background: #fff;
-                color: #111827;
+                background: #FFFBFE;
+                color: #1C1B1F;
             }
 
             .card,
             .panel,
             .hero {
-                box-shadow: none;
-                background: #fff;
-                border-color: #d1d5db;
+                background: #FFFBFE;
+                border: 1px solid #CAC4D0;
             }
 
             .chart-box {
                 break-inside: avoid;
+            }
+
+            .value {
+                color: #6750A4;
             }
         }
     </style>
@@ -293,38 +288,13 @@
 <body>
     <main class="page">
         <section class="hero">
-            <div>
-                <div class="brand">
-                    <div class="logo" aria-hidden="true">cl</div>
-                    <div>
-                        <div class="label">HTTP load testing report</div>
-                        <strong>clank-cli</strong>
-                    </div>
-                </div>
-                <h1>Load Test Report</h1>
-                <p class="subtitle" id="target-url"></p>
-                <pre class="command" id="command"></pre>
-            </div>
-
-            <aside class="meta" aria-label="Report metadata">
-                <dl>
-                    <div>
-                        <dt>Generated</dt>
-                        <dd id="generated-at"></dd>
-                    </div>
-                    <div>
-                        <dt>Duration</dt>
-                        <dd id="duration"></dd>
-                    </div>
-                    <div>
-                        <dt>Rate Limit</dt>
-                        <dd id="rate-limit"></dd>
-                    </div>
-                    <div>
-                        <dt>Version</dt>
-                        <dd>clank-cli {{APP_VERSION}}</dd>
-                    </div>
-                </dl>
+            <div class="target-url" id="target-url"></div>
+            <pre class="command" id="command"></pre>
+            <aside class="meta">
+                <div><dt>Generated</dt><dd id="generated-at"></dd></div>
+                <div><dt>Duration</dt><dd id="duration"></dd></div>
+                <div><dt>Rate Limit</dt><dd id="rate-limit"></dd></div>
+                <div><dt>Version</dt><dd>{{APP_VERSION}}</dd></div>
             </aside>
         </section>
 
@@ -398,7 +368,7 @@
         </section>
 
         <footer>
-            Generated by clank-cli · Chart.js v{{CHART_JS_VERSION}} · self-contained offline report
+            Generated by clank-cli · Chart.js v{{CHART_JS_VERSION}}
         </footer>
     </main>
 
@@ -460,17 +430,13 @@
             })
             .join("");
 
-        const chartDefaults = {
-            color: "#91a4bd",
-            font: { family: "system-ui, -apple-system, Segoe UI, sans-serif" }
-        };
+        const m3Colors = ["#D0BCFF", "#CCC2DC", "#A0CBA0", "#F2B8B5", "#FFB77D", "#7DD3FC"];
 
-        Chart.defaults.color = chartDefaults.color;
-        Chart.defaults.font = chartDefaults.font;
+        Chart.defaults.color = "#CAC4D0";
+        Chart.defaults.font = { family: "system-ui, -apple-system, sans-serif" };
 
         function chartColors(count) {
-            const colors = ["#7dd3fc", "#34d399", "#fbbf24", "#fb7185", "#c084fc", "#60a5fa"];
-            return Array.from({ length: count }, (_, index) => colors[index % colors.length]);
+            return Array.from({ length: count }, (_, i) => m3Colors[i % m3Colors.length]);
         }
 
         function renderBarChart(canvasId, points, label, labelKey, valueKey) {
@@ -486,7 +452,7 @@
                         data: values,
                         backgroundColor: chartColors(values.length),
                         borderWidth: 0,
-                        borderRadius: 10
+                        borderRadius: 6
                     }]
                 },
                 options: {
@@ -494,8 +460,8 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { grid: { color: "rgba(148, 163, 184, 0.12)" } },
-                        y: { beginAtZero: true, grid: { color: "rgba(148, 163, 184, 0.12)" } }
+                        x: { grid: { color: "rgba(73, 69, 78, 0.4)" } },
+                        y: { beginAtZero: true, grid: { color: "rgba(73, 69, 78, 0.4)" } }
                     }
                 }
             });
@@ -512,7 +478,7 @@
                     datasets: [{
                         data: values,
                         backgroundColor: chartColors(values.length),
-                        borderColor: "#11182d",
+                        borderColor: "#2B2930",
                         borderWidth: 3
                     }]
                 },
@@ -556,8 +522,7 @@
 <p class="hint">${fmt.format(report.validation.failures.length)} validation error(s) were recorded.</p>
 <ul class="errors-list">
   ${report.validation.failures.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}
-</ul>
-`;
+</ul>`;
         } else if (report.validation) {
             validationPanel.classList.add("validation-ok");
             validationContent.innerHTML = `<p class="hint">Response validation was configured and all checks passed.</p>`;
