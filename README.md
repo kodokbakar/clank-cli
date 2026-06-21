@@ -321,6 +321,8 @@ Use response validation when you want to load test an endpoint and verify that e
 
 Validation failures are counted as errors in the final stats. They also increment the `validation_errors` field in JSON and CSV output, so you can distinguish response validation failures from connection errors, timeouts, and HTTP 5xx errors.
 
+When validation fails, `clank-cli` still prints the selected summary output first, then prints validation failure details to stderr and exits with status code `1`.
+
 Examples:
 
 ```bash
