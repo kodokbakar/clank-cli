@@ -184,6 +184,36 @@ fn parse_json_stdout(output: &ClankOutput) -> Result<Value> {
     })
 }
 
+fn extract_report_data(html: &str) -> Result<Value> {
+    let marker = r#"<script id="report-data" type="application/json">"#;
+    let start = html
+        .find(marker)
+        .map(|index| index + marker.len())
+        .context("missing report-data script tag")?;
+
+    let end = html[start..]
+        .find("</script>")
+        .map(|index| start + index)
+        .context("missing report-data closing script tag")?;
+
+    let json = html[start..end].trim();
+
+    serde_json::from_str(json)
+        .with_context(|| format!("failed to parse embedded report JSON\njson:\n{json}"))
+}
+
+fn assert_success(output: &ClankOutput) -> Result<()> {
+    if !output.status.success() {
+        bail!(
+            "clank-cli failed\nstdout:\n{}\nstderr:\n{}",
+            output.stdout,
+            output.stderr
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_writes_html_report_to_explicit_output_file() -> Result<()> {
     let server = start_html_report_server().await?;
@@ -205,13 +235,7 @@ async fn cli_writes_html_report_to_explicit_output_file() -> Result<()> {
         "--no-color",
     ])?;
 
-    if !output.status.success() {
-        bail!(
-            "clank-cli failed\nstdout:\n{}\nstderr:\n{}",
-            output.stdout,
-            output.stderr
-        );
-    }
+    assert_success(&output)?;
 
     assert_eq!(server.request_count(), 1);
     assert!(output.stdout.contains("HTML report written to"));
@@ -220,10 +244,70 @@ async fn cli_writes_html_report_to_explicit_output_file() -> Result<()> {
     let html = fs::read_to_string(&report_path)
         .with_context(|| format!("failed to read {}", report_path.display()))?;
 
+    let metadata = fs::metadata(&report_path)
+        .with_context(|| format!("failed to stat {}", report_path.display()))?;
+
+    assert!(
+        metadata.len() > 50 * 1024,
+        "HTML report should include template and bundled Chart.js, got {} bytes",
+        metadata.len()
+    );
     assert!(html.contains("<!doctype html>"));
     assert!(html.contains(r#"id="report-data""#));
     assert!(html.contains("Chart.js v4.5.1"));
     assert!(html.contains(server.url()));
+
+    fs::remove_file(report_path).ok();
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_html_report_contains_all_sections() -> Result<()> {
+    let server = start_html_report_server().await?;
+    let report_path = unique_temp_path("sections-report");
+
+    let output = run_clank(&[
+        server.url(),
+        "--requests",
+        "1",
+        "--concurrency",
+        "1",
+        "--quiet",
+        "--output",
+        "html",
+        "--output-file",
+        report_path
+            .to_str()
+            .context("report path is not valid UTF-8")?,
+        "--no-color",
+    ])?;
+
+    assert_success(&output)?;
+
+    let html = fs::read_to_string(&report_path)
+        .with_context(|| format!("failed to read {}", report_path.display()))?;
+
+    assert!(html.contains("Load Test Report"));
+    assert!(html.contains("Total Requests"));
+    assert!(html.contains("Throughput"));
+    assert!(html.contains("Success Rate"));
+    assert!(html.contains("Total Errors"));
+    assert!(html.contains("Latency Percentiles"));
+    assert!(html.contains("Latency Histogram"));
+    assert!(html.contains("Status Codes"));
+    assert!(html.contains("Error Distribution"));
+    assert!(html.contains("Response Validation"));
+    assert!(html.contains("<canvas id=\"status-chart\""));
+    assert!(html.contains("<canvas id=\"latency-chart\""));
+    assert!(html.contains("<canvas id=\"error-chart\""));
+    assert!(html.contains(r#"<script id="report-data" type="application/json">"#));
+
+    let report_data = extract_report_data(&html)?;
+    assert!(report_data["metadata"].is_object());
+    assert!(report_data["summary"].is_object());
+    assert!(report_data["latency_histogram"].is_array());
+    assert!(report_data["status_codes"].is_array());
 
     fs::remove_file(report_path).ok();
 
@@ -250,13 +334,7 @@ async fn cli_writes_html_report_to_default_output_file() -> Result<()> {
         &temp_dir,
     )?;
 
-    if !output.status.success() {
-        bail!(
-            "clank-cli failed\nstdout:\n{}\nstderr:\n{}",
-            output.stdout,
-            output.stderr
-        );
-    }
+    assert_success(&output)?;
 
     assert!(output.stdout.contains("HTML report written to"));
 
@@ -297,18 +375,45 @@ async fn cli_keeps_json_output_working() -> Result<()> {
         "--no-color",
     ])?;
 
-    if !output.status.success() {
-        bail!(
-            "clank-cli failed\nstdout:\n{}\nstderr:\n{}",
-            output.stdout,
-            output.stderr
-        );
-    }
+    assert_success(&output)?;
 
     let json = parse_json_stdout(&output)?;
 
     assert_eq!(json["total_requests"], 1);
     assert_eq!(json["successful"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_html_report_error_on_write_failure() -> Result<()> {
+    let server = start_html_report_server().await?;
+    let report_path = unique_temp_dir("write-failure-report")?;
+
+    let output = run_clank(&[
+        server.url(),
+        "--requests",
+        "1",
+        "--concurrency",
+        "1",
+        "--quiet",
+        "--output",
+        "html",
+        "--output-file",
+        report_path
+            .to_str()
+            .context("report path is not valid UTF-8")?,
+        "--no-color",
+    ])?;
+
+    assert!(!output.status.success());
+    assert!(
+        output.stderr.contains("failed to write HTML report"),
+        "stderr should mention write failure, got:\n{}",
+        output.stderr
+    );
+
+    fs::remove_dir_all(report_path).ok();
 
     Ok(())
 }
@@ -329,6 +434,77 @@ fn cli_rejects_duplicate_output_flags() -> Result<()> {
 
     assert!(!output.status.success());
     assert!(output.stderr.contains("--output"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_html_report_data_accuracy() -> Result<()> {
+    let server = start_html_report_server().await?;
+    let report_path = unique_temp_path("data-accuracy-report");
+
+    let output = run_clank(&[
+        server.url(),
+        "--requests",
+        "3",
+        "--concurrency",
+        "1",
+        "--quiet",
+        "--output",
+        "html",
+        "--output-file",
+        report_path
+            .to_str()
+            .context("report path is not valid UTF-8")?,
+        "--no-color",
+    ])?;
+
+    assert_success(&output)?;
+    assert_eq!(server.request_count(), 3);
+
+    let html = fs::read_to_string(&report_path)
+        .with_context(|| format!("failed to read {}", report_path.display()))?;
+    let report_data = extract_report_data(&html)?;
+
+    assert_eq!(report_data["metadata"]["target_url"], server.url());
+    assert_eq!(report_data["metadata"]["concurrency"], 1);
+    assert_eq!(report_data["summary"]["total_requests"], 3);
+    assert_eq!(report_data["summary"]["successful"], 3);
+    assert_eq!(report_data["summary"]["failed"], 0);
+    assert_eq!(report_data["summary"]["validation_errors"], 0);
+
+    let rps = report_data["summary"]["rps"]
+        .as_f64()
+        .context("summary.rps should be a number")?;
+    assert!(rps >= 0.0);
+
+    let p50 = report_data["latency"]["p50_ms"]
+        .as_f64()
+        .context("latency.p50_ms should be a number")?;
+    let p99 = report_data["latency"]["p99_ms"]
+        .as_f64()
+        .context("latency.p99_ms should be a number")?;
+    assert!(p99 >= p50);
+
+    let status_codes = report_data["status_codes"]
+        .as_array()
+        .context("status_codes should be an array")?;
+    let status_200 = status_codes
+        .iter()
+        .find(|status| status["code"] == 200)
+        .context("status 200 should exist")?;
+    assert_eq!(status_200["count"], 3);
+
+    let latency_histogram_total = report_data["latency_histogram"]
+        .as_array()
+        .context("latency_histogram should be an array")?
+        .iter()
+        .map(|bucket| bucket["count"].as_u64().unwrap_or(0))
+        .sum::<u64>();
+
+    assert_eq!(latency_histogram_total, 3);
+
+    fs::remove_file(report_path).ok();
 
     Ok(())
 }
