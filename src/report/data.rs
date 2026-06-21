@@ -250,6 +250,13 @@ fn build_validation_report(
     validation: Option<&ValidationConfig>,
     snapshot: &StatsSnapshot,
 ) -> Option<ValidationReport> {
+    let validation_failures = snapshot
+        .errors
+        .iter()
+        .filter(|error| is_validation_failure_message(error))
+        .cloned()
+        .collect::<Vec<_>>();
+
     let has_expectations = validation.is_some_and(|validation| {
         validation.expect_status.is_some()
             || validation.expect_body.is_some()
@@ -259,7 +266,7 @@ fn build_validation_report(
                 .is_some_and(|headers| !headers.is_empty())
     });
 
-    if !has_expectations && snapshot.errors.is_empty() {
+    if !has_expectations && validation_failures.is_empty() {
         return None;
     }
 
@@ -279,8 +286,15 @@ fn build_validation_report(
         expected_status,
         expected_body,
         expected_headers,
-        failures: snapshot.errors.clone(),
+        failures: validation_failures,
     })
+}
+
+fn is_validation_failure_message(error: &str) -> bool {
+    error.starts_with("expected status")
+        || error.starts_with("expected body")
+        || error.starts_with("invalid body regex")
+        || error.starts_with("expected header")
 }
 
 fn average_latency_ms(snapshot: &StatsSnapshot) -> f64 {
@@ -396,8 +410,22 @@ mod tests {
         );
         assert_eq!(
             validation_report.failures,
-            vec!["request timed out", "expected body to match pattern `ok`",]
+            vec!["expected body to match pattern `ok`"]
         );
+    }
+
+    #[test]
+    fn validation_report_ignores_non_validation_errors() {
+        let mut stats = StatsCollector::new();
+
+        stats.record_error(ErrorCategory::Timeout, "request timed out");
+
+        let snapshot = stats.snapshot();
+        let data = HtmlReportData::from_stats_snapshot(&context(&snapshot, None));
+
+        assert_eq!(data.validation, None);
+        assert_eq!(data.errors.len(), 1);
+        assert_eq!(data.errors[0].error_type, "Timeout");
     }
 
     #[test]
