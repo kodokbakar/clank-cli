@@ -21,6 +21,8 @@ HTTP load testing CLI built with Rust. Lightweight, fast, and cross-platform.
 - Ramp-up mode with `--ramp-up` and `--ramp-up-step`
 - Retry support with `--retry` and `--retry-delay`
 - Keep-alive control with `--keep-alive` and `--no-keep-alive`
+- Response validation with `--expect-status`, `--expect-body`, and `--expect-header`
+- Validation error stats in plain text, JSON, CSV, and live terminal output
 - Retry stats in plain text, JSON, and CSV output
 
 ## Installation
@@ -119,6 +121,15 @@ clank-cli https://api.example.com \
   --retry 3 \
   --retry-delay 100ms \
   --duration 30s
+
+# Response validation + retry + rate limiting
+clank-cli https://api.example.com \
+  --expect-status 200,201 \
+  --expect-body '"status":"ok"' \
+  --expect-header "Content-Type: application/json" \
+  --retry 3 \
+  --rate-limit 100/s \
+  --duration 30s
 ```
 
 ### Config file
@@ -145,11 +156,11 @@ Use `--rate-limit` or `-r` to throttle request throughput across all workers.
 
 Supported formats:
 
-| Format | Meaning |
-|--------|---------|
-| `100/s` | 100 requests per second |
-| `5000/m` | 5000 requests per minute |
-| `10000/h` | 10000 requests per hour |
+| Format    | Meaning                  |
+| --------- | ------------------------ |
+| `100/s`   | 100 requests per second  |
+| `5000/m`  | 5000 requests per minute |
+| `10000/h` | 10000 requests per hour  |
 
 Examples:
 
@@ -304,6 +315,43 @@ Use `--no-keep-alive` when:
 
 `--keep-alive` is the default. `--no-keep-alive` disables connection reuse.
 
+## Response Validation
+
+Use response validation when you want to load test an endpoint and verify that each response still matches the expected contract. This is useful for checking status codes, response body content, and headers without switching to a separate `curl` command.
+
+Validation failures are counted as errors in the final stats. They also increment the `validation_errors` field in JSON and CSV output, so you can distinguish response validation failures from connection errors, timeouts, and HTTP 5xx errors.
+
+Examples:
+
+```bash
+# Expect every response to return HTTP 200
+clank-cli http://localhost:8080 --expect-status 200
+
+# Allow multiple successful status codes
+clank-cli http://localhost:8080 --expect-status 200,201,204
+
+# Expect the response body to contain a case-sensitive pattern
+clank-cli http://localhost:8080 --expect-body '"status":"ok"'
+
+# Expect a response header
+clank-cli http://localhost:8080 --expect-header "Content-Type: application/json"
+
+# Combine status, body, and header validation
+clank-cli http://localhost:8080 \
+  --expect-status 200 \
+  --expect-body "ok" \
+  --expect-header "Content-Type: application/json"
+```
+
+Validation behavior:
+
+| Flag                           | Behavior                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `--expect-status <CODES>`      | Validates that the response status code is included in the comma-separated list.                       |
+| `--expect-body <PATTERN>`      | Matches a case-sensitive pattern against the response body. Simple text works like substring matching. |
+| `--expect-header <KEY: VALUE>` | Validates a response header. Header key matching is case-insensitive. Header value matching is exact.  |
+
+Response validation runs after retry handling. For example, if a request returns `503` and then succeeds with `200` after retry, validation is applied to the final response.
 
 ## CLI Reference
 
@@ -323,6 +371,9 @@ Use `--no-keep-alive` when:
 | `-B, --body-file` | `-B` | Request body from file | — |
 | `-T, --content-type` | `-T` | Content-Type header | — |
 | `-H, --header` | `-H` | Custom header (repeatable) | — |
+| `--expect-status <CODES>` | | Validate response status code, comma-separated | — |
+| `--expect-body <PATTERN>` | | Validate response body with a case-sensitive pattern | — |
+| `--expect-header <KEY: VALUE>` | | Validate response header (repeatable) | — |
 | `--timeout-secs` | | Request timeout in seconds | 10 |
 | `-o, --output` | `-o` | Output format (`text`, `json`, `csv`) | text |
 | `-f, --config` | `-f` | Config file path | `clank.yaml` |
@@ -345,6 +396,7 @@ Results:
 Total Requests:    1,234
 Successful:        1,200 (97.2%)
 Errors:            34 (2.8%)
+Validation Errors: 3
 Retries:           12
   Timeout:         12
   Connection:      8
@@ -369,6 +421,7 @@ Duration:          10.00s
 ```json
 {
   "total_requests": 1234,
+  "validation_errors": 3,
   "retries": 12,
   "successful": 1200,
   "errors": 34,
@@ -397,8 +450,8 @@ Duration:          10.00s
 ### CSV (`-o csv`)
 
 ```
-total_requests,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
-1234,12,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
+total_requests,validation_errors,retries,successful,errors,error_rate,avg_ms,p50_ms,p95_ms,p99_ms,p999_ms,throughput_rps,rate_limit,duration_secs,timeout,connection,http_4xx,http_5xx,http_other,other
+1234,3,12,1200,34,2.8,45.2,42.0,78.0,156.7,230.1,123.4,100/s,10.00,12,8,14,0,0,0
 ```
 
 ## FAQ

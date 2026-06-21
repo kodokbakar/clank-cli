@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-06-21
+
+### Added
+
+- Response status validation with `--expect-status <CODES>`.
+- Response body validation with `--expect-body <PATTERN>`.
+- Response header validation with `--expect-header <KEY: VALUE>`.
+- `validation_errors` field in stats output.
+- Integration tests for response validation status, body, header, combined validation, and validation with retry.
+- README documentation for response validation.
+
 ## [0.2.2] - 2026-06-20
 
 ### Added
