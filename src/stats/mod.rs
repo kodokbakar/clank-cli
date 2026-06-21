@@ -21,7 +21,6 @@ pub enum ErrorCategory {
     Timeout,
     Connection,
     Http,
-    ValidationFailure,
     Other,
 }
 
@@ -242,9 +241,6 @@ impl StatsCollector {
             ErrorCategory::Timeout => self.error_counts.timeout += 1,
             ErrorCategory::Connection => self.error_counts.connection += 1,
             ErrorCategory::Http => self.error_counts.http_other += 1,
-            ErrorCategory::ValidationFailure => {
-                self.validation_errors = self.validation_errors.saturating_add(1);
-            }
             ErrorCategory::Other => self.error_counts.other += 1,
         }
 

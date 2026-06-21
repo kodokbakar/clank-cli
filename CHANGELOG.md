@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] - 2026-06-21
+
+### Added
+
+- Integration test for invalid regex handling in `--expect-body`.
+- Integration tests for `--expect-header` value mismatch, missing header, and multiple matching headers.
+
+### Changed
+
+- Validation failures now exit with a non-zero status code after printing the summary.
+- Validation failure details are now printed to stderr.
+
+### Removed
+
+- Unused `ErrorCategory::ValidationFailure` dead code.
+
 ## [0.2.3] - 2026-06-21
 
 ### Added

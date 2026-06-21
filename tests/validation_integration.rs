@@ -1,5 +1,5 @@
 use std::io;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -180,27 +180,63 @@ fn clank_binary() -> &'static str {
     env!("CARGO_BIN_EXE_clank-cli")
 }
 
-fn run_clank_json(args: &[&str]) -> Result<Value> {
+struct ClankOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_clank(args: &[&str]) -> Result<ClankOutput> {
     let output = Command::new(clank_binary())
         .args(args)
         .output()
         .context("failed to run clank-cli binary")?;
 
-    let stdout = String::from_utf8(output.stdout).context("clank-cli stdout is not UTF-8")?;
-    let stderr = String::from_utf8(output.stderr).context("clank-cli stderr is not UTF-8")?;
+    Ok(ClankOutput {
+        status: output.status,
+        stdout: String::from_utf8(output.stdout).context("clank-cli stdout is not UTF-8")?,
+        stderr: String::from_utf8(output.stderr).context("clank-cli stderr is not UTF-8")?,
+    })
+}
+
+fn parse_json_output(output: &ClankOutput) -> Result<Value> {
+    serde_json::from_str(&output.stdout).with_context(|| {
+        format!(
+            "failed to parse clank-cli JSON output\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        )
+    })
+}
+
+fn run_clank_json_expect_validation_failure(args: &[&str]) -> Result<(Value, String)> {
+    let output = run_clank(args)?;
+
+    if output.status.success() {
+        bail!(
+            "expected clank-cli to exit with validation failure\nstdout:\n{}\nstderr:\n{}",
+            output.stdout,
+            output.stderr
+        );
+    }
+
+    let json = parse_json_output(&output)?;
+
+    Ok((json, output.stderr))
+}
+
+fn run_clank_json(args: &[&str]) -> Result<Value> {
+    let output = run_clank(args)?;
 
     if !output.status.success() {
         bail!(
             "clank-cli exited with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
-            stdout,
-            stderr
+            output.stdout,
+            output.stderr
         );
     }
 
-    serde_json::from_str(&stdout).with_context(|| {
-        format!("failed to parse clank-cli JSON output\nstdout:\n{stdout}\nstderr:\n{stderr}")
-    })
+    parse_json_output(&output)
 }
 
 fn validation_args<'a>(server_url: &'a str, extra_args: &'a [&'a str]) -> Vec<&'a str> {
@@ -224,7 +260,13 @@ fn validation_args<'a>(server_url: &'a str, extra_args: &'a [&'a str]) -> Vec<&'
 async fn cli_counts_wrong_status_code_as_validation_error() -> Result<()> {
     let server = start_validation_server(vec![ResponseSpec::new(404, "not found")]).await?;
 
-    let output = run_clank_json(&validation_args(server.url(), &["--expect-status", "200"]))?;
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-status", "200"],
+    ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected status"));
 
     assert_eq!(server.request_count(), 1);
     assert_eq!(output["total_requests"], 1);
@@ -291,15 +333,63 @@ async fn cli_counts_wrong_body_pattern_as_validation_error() -> Result<()> {
     let server =
         start_validation_server(vec![ResponseSpec::new(200, r#"{"status":"error"}"#)]).await?;
 
-    let output = run_clank_json(&validation_args(
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
         server.url(),
         &["--expect-body", r#""status":"ok""#],
     ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected body to match pattern"));
 
     assert_eq!(server.request_count(), 1);
     assert_eq!(output["successful"], 0);
     assert_eq!(output["errors"], 1);
     assert_eq!(output["validation_errors"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_counts_invalid_regex_as_validation_error() -> Result<()> {
+    let server = start_validation_server(vec![ResponseSpec::new(200, "hello")]).await?;
+
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-body", "[invalid"],
+    ))?;
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 0);
+    assert_eq!(output["errors"], 1);
+    assert_eq!(output["validation_errors"], 1);
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("invalid body regex"));
+    assert!(stderr.contains("[invalid"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_handles_complex_valid_regex() -> Result<()> {
+    let server =
+        start_validation_server(vec![ResponseSpec::new(200, "status: ok, count: 42")]).await?;
+
+    let digit_output = run_clank_json(&validation_args(server.url(), &["--expect-body", "\\d+"]))?;
+
+    assert_eq!(digit_output["successful"], 1);
+    assert_eq!(digit_output["errors"], 0);
+    assert_eq!(digit_output["validation_errors"], 0);
+
+    let prefix_output = run_clank_json(&validation_args(
+        server.url(),
+        &["--expect-body", "^status"],
+    ))?;
+
+    assert_eq!(prefix_output["successful"], 1);
+    assert_eq!(prefix_output["errors"], 0);
+    assert_eq!(prefix_output["validation_errors"], 0);
 
     Ok(())
 }
@@ -317,6 +407,84 @@ async fn cli_accepts_correct_header_with_case_insensitive_key() -> Result<()> {
     ))?;
 
     assert_eq!(server.request_count(), 1);
+    assert_eq!(output["successful"], 1);
+    assert_eq!(output["errors"], 0);
+    assert_eq!(output["validation_errors"], 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_counts_header_value_mismatch_as_validation_error() -> Result<()> {
+    let server = start_validation_server(vec![
+        ResponseSpec::new(200, "ok").with_header("Content-Type", "text/html"),
+    ])
+    .await?;
+
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-header", "Content-Type: application/json"],
+    ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected header"));
+    assert!(stderr.contains("Content-Type"));
+    assert!(stderr.contains("application/json"));
+    assert!(stderr.contains("text/html"));
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 0);
+    assert_eq!(output["errors"], 1);
+    assert_eq!(output["validation_errors"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_counts_missing_header_as_validation_error() -> Result<()> {
+    let server = start_validation_server(vec![ResponseSpec::new(200, "ok")]).await?;
+
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
+        server.url(),
+        &["--expect-header", "X-Custom: some-value"],
+    ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected header"));
+    assert!(stderr.contains("X-Custom"));
+    assert!(stderr.contains("some-value"));
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
+    assert_eq!(output["successful"], 0);
+    assert_eq!(output["errors"], 1);
+    assert_eq!(output["validation_errors"], 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_accepts_multiple_headers_all_match() -> Result<()> {
+    let server = start_validation_server(vec![
+        ResponseSpec::new(200, "ok")
+            .with_header("Content-Type", "application/json")
+            .with_header("X-Custom", "some-value"),
+    ])
+    .await?;
+
+    let output = run_clank_json(&validation_args(
+        server.url(),
+        &[
+            "--expect-header",
+            "Content-Type: application/json",
+            "--expect-header",
+            "X-Custom: some-value",
+        ],
+    ))?;
+
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(output["total_requests"], 1);
     assert_eq!(output["successful"], 1);
     assert_eq!(output["errors"], 0);
     assert_eq!(output["validation_errors"], 0);
@@ -360,10 +528,13 @@ async fn cli_applies_validation_after_retry_final_response() -> Result<()> {
     ])
     .await?;
 
-    let output = run_clank_json(&validation_args(
+    let (output, stderr) = run_clank_json_expect_validation_failure(&validation_args(
         server.url(),
         &["--retry", "2", "--expect-body", "ok"],
     ))?;
+
+    assert!(stderr.contains("Validation failed:"));
+    assert!(stderr.contains("expected body to match pattern"));
 
     assert_eq!(server.request_count(), 2);
     assert_eq!(output["total_requests"], 1);
